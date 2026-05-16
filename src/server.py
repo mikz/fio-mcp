@@ -88,6 +88,8 @@ class FindTransactionsQuery(BaseModel):
                     "direction": "incoming",
                     "currency": "CZK",
                     "variable_symbol": "2026000001",
+                    "counterparty_account": "2198370339",
+                    "counterparty_bank_code": "0800",
                     "limit": 100,
                     "cursor": None,
                     "detail_level": "summary",
@@ -111,6 +113,9 @@ class FindTransactionsQuery(BaseModel):
     variable_symbol: str | None = None
     constant_symbol: str | None = None
     specific_symbol: str | None = None
+    counterparty_account: str | None = None
+    counterparty_bank_code: str | None = None
+    counterparty_name: str | None = None
     counterparty_search: str | None = None
     message_search: str | None = None
     min_amount: Decimal | None = None
@@ -144,6 +149,9 @@ class FindTransactionsQuery(BaseModel):
                 "variable_symbol": self.variable_symbol,
                 "constant_symbol": self.constant_symbol,
                 "specific_symbol": self.specific_symbol,
+                "counterparty_account": self.counterparty_account,
+                "counterparty_bank_code": self.counterparty_bank_code,
+                "counterparty_name": self.counterparty_name,
                 "counterparty_search": self.counterparty_search,
                 "message_search": self.message_search,
                 "min_amount": str(self.min_amount) if self.min_amount is not None else None,
@@ -1072,6 +1080,24 @@ def _filter_transactions(
             transaction
             for transaction in result
             if transaction.specific_symbol == query.specific_symbol
+        ]
+    if query.counterparty_account:
+        result = [
+            transaction
+            for transaction in result
+            if transaction.counterparty_account == query.counterparty_account
+        ]
+    if query.counterparty_bank_code:
+        result = [
+            transaction
+            for transaction in result
+            if transaction.counterparty_bank_code == query.counterparty_bank_code
+        ]
+    if query.counterparty_name:
+        result = [
+            transaction
+            for transaction in result
+            if transaction.counterparty_name == query.counterparty_name
         ]
     if query.min_amount is not None:
         result = [

@@ -376,6 +376,56 @@ async def test_find_transactions_filters_and_pages(monkeypatch: pytest.MonkeyPat
     assert second.rate_limit.consumed_lease is False
 
 
+@respx.mock
+async def test_find_transactions_filters_exact_counterparty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(
+        "https://fioapi.fio.cz/v1/rest/periods/token-for-test/2026-03-01/2026-03-31/transactions.json"
+    ).mock(
+        return_value=Response(
+            200,
+            json=sample_fio_response(
+                [
+                    sample_transaction(
+                        transaction_id="darujme",
+                        amount="1926.00",
+                        counterparty_account="2198370339",
+                        counterparty_bank_code="0800",
+                        counterparty_name="Nadace VIA",
+                    ),
+                    sample_transaction(
+                        transaction_id="other",
+                        amount="100.00",
+                        counterparty_account="123456789",
+                        counterparty_bank_code="2010",
+                        counterparty_name="Jana Novakova",
+                    ),
+                ]
+            ),
+        )
+    )
+    client = FioClient(settings(monkeypatch))
+
+    result = await _find_transactions(
+        client,
+        FindTransactionsQuery(
+            account="main",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+            direction="incoming",
+            counterparty_account="2198370339",
+            counterparty_bank_code="0800",
+            counterparty_name="Nadace VIA",
+            detail_level="counterparty",
+        ),
+    )
+    await client.aclose()
+
+    assert result.error is None
+    assert [transaction.transaction_id for transaction in result.transactions] == ["darujme"]
+
+
 async def test_large_period_is_rejected_without_call(monkeypatch: pytest.MonkeyPatch) -> None:
     client = FioClient(settings(monkeypatch))
 
