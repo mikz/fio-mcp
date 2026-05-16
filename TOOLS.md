@@ -37,17 +37,20 @@ clients. When `detail_level` is omitted, `include_counterparty_details: false`
 maps to `matching`, `include_counterparty_details: true` maps to `full`, and
 `include_raw: true` maps to `raw`.
 
-## `fio_add_token`
+## `fio_login`
 
-Collects a Fio API token through an inline FastMCP Apps form, validates it, and
-stores it locally. This matches the SimpleShop login UX: call the tool with a
-human prompt, then stop and wait for the user to submit the form.
+Collects a Fio API token through one setup tool. `mode` accepts `auto`,
+`direct`, `prefab`, or `web`. `auto` uses Prefab when the MCP client advertises
+Apps UI support, otherwise it returns a localhost web-login URL. `direct` accepts
+the token and optional alias in the `credentials` object.
 
 ```json
 {
-  "prompt": "Add the Fio API token for payment reconciliation.",
-  "title": "Add Fio API Token",
-  "submit_text": "Add token"
+  "mode": "direct",
+  "credentials": {
+    "token": "fio-token",
+    "alias": "main"
+  }
 }
 ```
 
@@ -248,7 +251,7 @@ period_too_large       reduce range or raise FIO_MAX_PERIOD_DAYS intentionally
 invalid_cursor         discard cursor and repeat the original query
 cursor_mismatch        repeat the exact filters used to create the cursor
 unknown_account        call fio_list_accounts and retry with alias or account_key
-not_configured         call fio_add_token first
+not_configured         call fio_login first
 ambiguous_account      pass account because multiple accounts are configured
 unknown_token          call fio_list_accounts with include_tokens=true
 last_token             add another token before removing this one

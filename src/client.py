@@ -115,7 +115,7 @@ class FioClient:
             accounts = self.accounts()
             if not accounts:
                 raise FioApiError(
-                    "No Fio accounts configured. Call fio_add_token first.",
+                    "No Fio accounts configured. Call fio_login first.",
                     code="not_configured",
                 )
             if len(accounts) > 1:

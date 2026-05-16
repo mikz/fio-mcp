@@ -10,11 +10,10 @@ and testable helper functions behind FastMCP tools.
 ## Token Handling
 
 Reader tools accept account aliases or canonical account keys, not raw tokens.
-The only raw-token path is the form-backed `fio_add_token` setup flow. The
-exposed tool launches a FastMCP Apps form rather than accepting a token argument
-directly. Its submit callback validates the token through a safe `periods` read,
-derives the returned Fio account identity, and stores the token behind that
-account.
+The only raw-token path is the `fio_login` setup flow. It supports direct,
+Prefab, and localhost web modes; all modes call the same submit callback, which
+validates the token through a safe `periods` read, derives the returned Fio
+account identity, and stores the token behind that account.
 
 Runtime credentials are stored in a credential store scoped to the server
 process `cwd`. The OS keyring service is `fio-mcp:<scope-id>`, account

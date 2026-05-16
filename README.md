@@ -7,7 +7,7 @@ bank movements without mutating bank state. It uses Fio's read APIs only.
 
 ## Features
 
-- Runtime token setup with the form-backed `fio_add_token`; accounts can hold
+- Runtime token setup with the unified `fio_login`; accounts can hold
   multiple tokens.
 - No raw token reader parameters, responses, cache keys, or intentional logs.
 - Per-token pacing with a 31 second local lease for Fio's 30 second guidance.
@@ -23,7 +23,7 @@ bank movements without mutating bank state. It uses Fio's read APIs only.
 
 ```text
 fio_list_accounts
-fio_add_token
+fio_login
 fio_alias_account
 fio_remove_token
 fio_test_connection
@@ -40,18 +40,19 @@ for rationale.
 The server starts without Fio credentials. Add tokens through the setup tools:
 
 ```text
-fio_add_token(prompt)
+fio_login(mode, credentials)
 fio_alias_account(account, alias)
 fio_remove_token(account, token_key)
 ```
 
-`fio_add_token` is a FastMCP Apps form, matching the SimpleShop login flow.
-Clients that support Apps render an inline form for the Fio API token and an
-optional account alias. The submit callback validates the token with a safe
-`periods` read for today, derives the real Fio account identity from the
-response, and adds the token to that account's token pool. If only one account
-is configured, transaction tools can omit `account`; otherwise pass either the
-account alias or canonical `account_key` from `fio_list_accounts`.
+`fio_login` supports `mode: "auto" | "direct" | "prefab" | "web"`. Apps-capable
+clients get an inline Prefab form for the Fio API token and optional account
+alias; clients such as Codex can use direct arguments or a localhost web form.
+The submit path validates the token with a safe `periods` read for today,
+derives the real Fio account identity from the response, and adds the token to
+that account's token pool. If only one account is configured, transaction tools
+can omit `account`; otherwise pass either the account alias or canonical
+`account_key` from `fio_list_accounts`.
 
 Successful setup is stored in a credential store scoped to the server process
 `cwd`. The OS keyring service is `fio-mcp:<scope-id>`, account `accounts`, where
@@ -65,7 +66,7 @@ The fallback file is written with mode `0600`. Legacy unscoped stores such as
 `${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/accounts.json` are not read.
 
 For headless pre-seeding, provide only a JSON array of raw tokens. The server
-validates them on startup through the same path as `fio_add_token` and then
+validates them on startup through the same path as `fio_login` and then
 stores the derived account registry locally.
 
 ```bash

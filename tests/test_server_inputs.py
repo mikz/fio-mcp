@@ -55,16 +55,19 @@ def test_query_rejects_unknown_keys() -> None:
         )
 
 
-async def test_exposed_add_token_is_form_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_exposed_login_is_unified_login_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module, "load_settings", lambda: settings(monkeypatch))
 
     async with Client(server_module.mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
-    assert "fio_add_token" in tools
-    properties = tools["fio_add_token"].inputSchema["properties"]
-    assert "token" not in properties
-    assert {"prompt", "title", "submit_text", "default"} <= set(properties)
+    assert "fio_login" in tools
+    properties = tools["fio_login"].inputSchema["properties"]
+    assert properties["mode"]["enum"] == ["auto", "direct", "prefab", "web"]
+    assert set(properties) == {"mode", "credentials"}
+    credentials_schema = properties["credentials"]["anyOf"][0]
+    assert credentials_schema["required"] == ["token"]
+    assert "token" in credentials_schema["properties"]
 
 
 async def test_add_token_form_submit_validates_stores_alias_and_updates_live_client(
