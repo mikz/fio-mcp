@@ -20,22 +20,20 @@ only     return cache only; never call Fio
 Transaction tools support explicit response shaping through `detail_level`:
 
 ```text
-matching      payment-matching fields only; hides names, accounts, free text, and raw payloads
-counterparty  matching fields plus structured counterparty account/name/bank fields
+summary       payment summary fields only; hides names, accounts, free text, and raw payloads
+counterparty  summary fields plus structured counterparty account/name/bank fields
 full          all normalized non-raw fields, including bank free text
 raw           full plus the raw Fio transaction payload
 ```
 
-For payment reconciliation with SimpleShop, prefer `detail_level: "matching"`.
+For pairing with SimpleShop or Darujme, prefer `detail_level: "summary"`.
 It returns `transaction_id`, dates, amount, currency, direction, payment symbols,
 transaction type, and bank order ID. It intentionally omits `message`,
 `comment`, `user_identification`, and payer reference because banks can place
 customer names in those fields.
 
-`include_counterparty_details` and `include_raw` remain accepted for older
-clients. When `detail_level` is omitted, `include_counterparty_details: false`
-maps to `matching`, `include_counterparty_details: true` maps to `full`, and
-`include_raw: true` maps to `raw`.
+`detail_level` is the only response-shaping input. Use `detail_level: "raw"` to
+include raw Fio payloads; the old compatibility flags are not accepted.
 
 ## `fio_login`
 
@@ -180,7 +178,7 @@ advance the bank-side last-download marker.
     "max_amount": "1000.00",
     "limit": 100,
     "cursor": null,
-    "detail_level": "matching",
+    "detail_level": "summary",
     "cache": "use"
   }
 }
@@ -205,7 +203,7 @@ download marker, so confirmation is required.
     "confirm_advances_download_marker": true,
     "limit": 100,
     "cursor": null,
-    "detail_level": "matching",
+    "detail_level": "summary",
     "cache": "use"
   }
 }

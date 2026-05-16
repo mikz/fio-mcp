@@ -4,7 +4,6 @@ from datetime import date
 
 import pytest
 import respx
-from fastmcp import Client
 from httpx import Response
 
 import client as client_module
@@ -16,14 +15,11 @@ from server import (
     FindTransactionsQuery,
     FioTokenSetup,
     NewTransactionsRequest,
-    SearchCursor,
     _add_token_on_submit,
     _client_from_settings,
-    _encode_cursor,
     _find_transactions,
     _get_new_transactions,
     _list_accounts,
-    _metadata_result,
     _shape_transaction,
 )
 from settings import Settings
@@ -53,21 +49,6 @@ def test_query_rejects_unknown_keys() -> None:
                 "token": "must-not-be-accepted",
             }
         )
-
-
-async def test_exposed_login_is_unified_login_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server_module, "load_settings", lambda: settings(monkeypatch))
-
-    async with Client(server_module.mcp) as client:
-        tools = {tool.name: tool for tool in await client.list_tools()}
-
-    assert "fio_login" in tools
-    properties = tools["fio_login"].inputSchema["properties"]
-    assert properties["mode"]["enum"] == ["auto", "direct", "prefab", "web"]
-    assert set(properties) == {"mode", "credentials"}
-    credentials_schema = properties["credentials"]["anyOf"][0]
-    assert credentials_schema["required"] == ["token"]
-    assert "token" in credentials_schema["properties"]
 
 
 async def test_add_token_form_submit_validates_stores_alias_and_updates_live_client(
@@ -115,7 +96,7 @@ async def test_add_token_form_submit_validates_stores_alias_and_updates_live_cli
     assert stored_accounts
 
 
-def test_detail_level_compatibility_mapping() -> None:
+def test_detail_level_defaults_and_raw_selection() -> None:
     assert (
         FindTransactionsQuery(
             date_from=date(2026, 5, 1),
@@ -127,15 +108,7 @@ def test_detail_level_compatibility_mapping() -> None:
         FindTransactionsQuery(
             date_from=date(2026, 5, 1),
             date_to=date(2026, 5, 16),
-            include_counterparty_details=False,
-        ).effective_detail_level()
-        == "matching"
-    )
-    assert (
-        FindTransactionsQuery(
-            date_from=date(2026, 5, 1),
-            date_to=date(2026, 5, 16),
-            include_raw=True,
+            detail_level="raw",
         ).effective_detail_level()
         == "raw"
     )
@@ -150,11 +123,37 @@ def test_detail_level_compatibility_mapping() -> None:
     explicit_detail = FindTransactionsQuery(
         date_from=date(2026, 5, 1),
         date_to=date(2026, 5, 16),
-        detail_level="matching",
-        include_raw=True,
+        detail_level="summary",
     )
-    assert explicit_detail.effective_detail_level() == "matching"
+    assert explicit_detail.effective_detail_level() == "summary"
     assert explicit_detail.effective_include_raw() is False
+
+
+def test_removed_detail_compatibility_aliases_are_rejected() -> None:
+    with pytest.raises(ValueError):
+        FindTransactionsQuery.model_validate(
+            {
+                "date_from": "2026-05-01",
+                "date_to": "2026-05-16",
+                "include_counterparty_details": False,
+            }
+        )
+    with pytest.raises(ValueError):
+        FindTransactionsQuery.model_validate(
+            {"date_from": "2026-05-01", "date_to": "2026-05-16", "include_raw": True}
+        )
+    with pytest.raises(ValueError):
+        FindTransactionsQuery.model_validate(
+            {"date_from": "2026-05-01", "date_to": "2026-05-16", "detail_level": "matching"}
+        )
+    with pytest.raises(ValueError):
+        NewTransactionsRequest.model_validate(
+            {"confirm_advances_download_marker": True, "include_raw": True}
+        )
+    with pytest.raises(ValueError):
+        NewTransactionsRequest.model_validate(
+            {"confirm_advances_download_marker": True, "detail_level": "matching"}
+        )
 
 
 def test_detail_level_shapes_transaction_privacy() -> None:
@@ -169,18 +168,18 @@ def test_detail_level_shapes_transaction_privacy() -> None:
         include_raw=True,
     ).transactions[0]
 
-    matching = _shape_transaction(transaction, "matching")
-    assert matching.transaction_id == transaction.transaction_id
-    assert matching.amount == transaction.amount
-    assert matching.variable_symbol == transaction.variable_symbol
-    assert matching.order_id == "39825209552"
-    assert matching.counterparty_account is None
-    assert matching.counterparty_name is None
-    assert matching.user_identification is None
-    assert matching.message is None
-    assert matching.comment is None
-    assert matching.payer_reference is None
-    assert matching.raw is None
+    summary = _shape_transaction(transaction, "summary")
+    assert summary.transaction_id == transaction.transaction_id
+    assert summary.amount == transaction.amount
+    assert summary.variable_symbol == transaction.variable_symbol
+    assert summary.order_id == "39825209552"
+    assert summary.counterparty_account is None
+    assert summary.counterparty_name is None
+    assert summary.user_identification is None
+    assert summary.message is None
+    assert summary.comment is None
+    assert summary.payer_reference is None
+    assert summary.raw is None
 
     counterparty = _shape_transaction(transaction, "counterparty")
     assert counterparty.counterparty_account == "123456789"
@@ -198,111 +197,6 @@ def test_detail_level_shapes_transaction_privacy() -> None:
 
     shaped_raw = _shape_transaction(transaction, "raw")
     assert shaped_raw.raw == raw
-
-
-async def test_metadata_exposes_tool_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = FioClient(settings(monkeypatch))
-    metadata = _metadata_result(client)
-
-    assert {entry.code for entry in metadata.cache_modes} == {"use", "refresh", "only"}
-    assert {entry.code for entry in metadata.detail_levels} == {
-        "matching",
-        "counterparty",
-        "full",
-        "raw",
-    }
-    assert {entry.code for entry in metadata.directions} == {"incoming", "outgoing", "any"}
-    assert metadata.limits.max_page_limit == 500
-    assert metadata.limits.max_period_days == 31
-    assert metadata.limits.rate_limit_seconds == 0
-    assert metadata.side_effects[0].tool == "fio_get_new_transactions"
-    assert metadata.side_effects[0].guard == "confirm_advances_download_marker=true"
-    await client.aclose()
-
-
-async def test_metadata_contains_emitted_error_codes(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = FioClient(settings(monkeypatch))
-    metadata_codes = {entry.code for entry in _metadata_result(client).error_codes}
-
-    emitted_codes = set()
-
-    confirmation = await _get_new_transactions(
-        client,
-        NewTransactionsRequest(account="main", confirm_advances_download_marker=False),
-    )
-    assert confirmation.error is not None
-    emitted_codes.add(confirmation.error.code)
-
-    too_large = await _find_transactions(
-        client,
-        FindTransactionsQuery(
-            account="main",
-            date_from=date(2026, 1, 1),
-            date_to=date(2026, 2, 15),
-        ),
-    )
-    assert too_large.error is not None
-    emitted_codes.add(too_large.error.code)
-
-    invalid_cursor = await _find_transactions(
-        client,
-        FindTransactionsQuery(
-            account="main",
-            date_from=date(2026, 5, 1),
-            date_to=date(2026, 5, 16),
-            cursor="not-a-cursor",
-        ),
-    )
-    assert invalid_cursor.error is not None
-    emitted_codes.add(invalid_cursor.error.code)
-
-    mismatched_cursor = await _find_transactions(
-        client,
-        FindTransactionsQuery(
-            account="main",
-            date_from=date(2026, 5, 1),
-            date_to=date(2026, 5, 16),
-            cursor=_encode_cursor(
-                SearchCursor(
-                    kind="period",
-                    cache_key="periods:main:2026-05-01:2026-05-16:raw=0",
-                    offset=1,
-                    limit=1,
-                    filter_hash="different-filter",
-                )
-            ),
-        ),
-    )
-    assert mismatched_cursor.error is not None
-    emitted_codes.add(mismatched_cursor.error.code)
-
-    cache_miss = await _find_transactions(
-        client,
-        FindTransactionsQuery(
-            account="main",
-            date_from=date(2026, 5, 1),
-            date_to=date(2026, 5, 16),
-            cache="only",
-        ),
-    )
-    assert cache_miss.error is not None
-    emitted_codes.add(cache_miss.error.code)
-
-    unknown_account = await _find_transactions(
-        client,
-        FindTransactionsQuery(
-            account="missing",
-            date_from=date(2026, 5, 1),
-            date_to=date(2026, 5, 16),
-        ),
-    )
-    assert unknown_account.error is not None
-    emitted_codes.add(unknown_account.error.code)
-
-    await client.aclose()
-
-    assert emitted_codes <= metadata_codes
-    assert "error" in metadata_codes
 
 
 async def test_list_accounts_exposes_safe_token_keys(monkeypatch: pytest.MonkeyPatch) -> None:

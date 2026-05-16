@@ -42,7 +42,7 @@ from models import (
 )
 from settings import Settings, load_settings
 
-DetailLevel = Literal["matching", "counterparty", "full", "raw"]
+DetailLevel = Literal["summary", "counterparty", "full", "raw"]
 MAX_PAGE_LIMIT = 500
 _LIVE_CLIENT: FioClient | None = None
 
@@ -90,7 +90,7 @@ class FindTransactionsQuery(BaseModel):
                     "variable_symbol": "2026000001",
                     "limit": 100,
                     "cursor": None,
-                    "detail_level": "matching",
+                    "detail_level": "summary",
                     "cache": "use",
                 },
                 {
@@ -120,23 +120,9 @@ class FindTransactionsQuery(BaseModel):
     detail_level: DetailLevel | None = Field(
         default=None,
         description=(
-            "Controls transaction response fields. matching returns only reconciliation-safe "
+            "Controls transaction response fields. summary returns only reconciliation-safe "
             "fields; counterparty adds structured counterparty fields; full returns normalized "
             "non-raw fields; raw also exposes raw Fio payloads."
-        ),
-    )
-    include_counterparty_details: bool = Field(
-        default=True,
-        description=(
-            "Deprecated compatibility flag. Prefer detail_level. When detail_level is omitted, "
-            "false maps to detail_level=matching and true maps to detail_level=full."
-        ),
-    )
-    include_raw: bool = Field(
-        default=False,
-        description=(
-            "Deprecated compatibility flag. Prefer detail_level=raw. When detail_level is set, "
-            "this flag is ignored."
         ),
     )
     cache: CacheMode = "use"
@@ -170,13 +156,9 @@ class FindTransactionsQuery(BaseModel):
     def effective_detail_level(self) -> DetailLevel:
         if self.detail_level is not None:
             return self.detail_level
-        if self.include_raw:
-            return "raw"
-        return "full" if self.include_counterparty_details else "matching"
+        return "full"
 
     def effective_include_raw(self) -> bool:
-        if self.detail_level is None:
-            return self.include_raw
         return self.detail_level == "raw"
 
 
@@ -190,16 +172,9 @@ class NewTransactionsRequest(BaseModel):
     detail_level: DetailLevel | None = Field(
         default=None,
         description=(
-            "Controls transaction response fields. matching returns only reconciliation-safe "
+            "Controls transaction response fields. summary returns only reconciliation-safe "
             "fields; counterparty adds structured counterparty fields; full returns normalized "
             "non-raw fields; raw also exposes raw Fio payloads."
-        ),
-    )
-    include_raw: bool = Field(
-        default=False,
-        description=(
-            "Deprecated compatibility flag. Prefer detail_level=raw. When detail_level is set, "
-            "this flag is ignored."
         ),
     )
     cache: CacheMode = "use"
@@ -207,11 +182,9 @@ class NewTransactionsRequest(BaseModel):
     def effective_detail_level(self) -> DetailLevel:
         if self.detail_level is not None:
             return self.detail_level
-        return "raw" if self.include_raw else "full"
+        return "full"
 
     def effective_include_raw(self) -> bool:
-        if self.detail_level is None:
-            return self.include_raw
         return self.detail_level == "raw"
 
 
@@ -294,6 +267,8 @@ class MetadataSideEffect(BaseModel):
 
 
 class MetadataResult(BaseModel):
+    source_documents: list[str] = Field(default_factory=list)
+    comparison_fields: dict[str, Any] = Field(default_factory=dict)
     setup_tools: list[str] = Field(default_factory=list)
     account_selection: dict[str, Any] = Field(default_factory=dict)
     columns: list[MetadataEntry] = Field(default_factory=list)
@@ -425,13 +400,13 @@ CACHE_MODE_METADATA = [
 ]
 DETAIL_LEVEL_METADATA = [
     MetadataEntry(
-        code="matching",
-        name="Payment matching fields only",
+        code="summary",
+        name="Payment summary fields only",
         description="No counterparty account, payer name, free text, or raw payload",
     ),
     MetadataEntry(
         code="counterparty",
-        name="Matching plus structured counterparty fields",
+        name="Summary plus structured counterparty fields",
         description="Free-text bank fields and raw payload remain hidden",
     ),
     MetadataEntry(
@@ -755,6 +730,14 @@ async def fio_get_metadata(ctx: Context) -> MetadataResult:
 
 def _metadata_result(client: FioClient) -> MetadataResult:
     return MetadataResult(
+        source_documents=["https://www.fio.cz/docs/cz/API_Bankovnictvi.pdf"],
+        comparison_fields={
+            "date_filters": ["date_from", "date_to"],
+            "payment_fields": ["variable_symbol", "currency", "amount"],
+            "detail_level_for_pairing": "summary",
+            "safe_endpoint": "periods",
+            "marker_advancing_endpoint": "last",
+        },
         setup_tools=["fio_login", "fio_alias_account", "fio_remove_token"],
         account_selection={
             "omitted_account_allowed_when": "exactly one account is configured",
@@ -1159,7 +1142,7 @@ def _page_result(
     )
 
 
-MATCHING_FIELDS = {
+SUMMARY_FIELDS = {
     "transaction_id",
     "posted_date",
     "amount",
@@ -1171,7 +1154,7 @@ MATCHING_FIELDS = {
     "transaction_type",
     "order_id",
 }
-COUNTERPARTY_FIELDS = MATCHING_FIELDS | {
+COUNTERPARTY_FIELDS = SUMMARY_FIELDS | {
     "counterparty_account",
     "counterparty_bank_code",
     "counterparty_bank_name",
@@ -1189,7 +1172,7 @@ def _shape_transaction(transaction: Transaction, detail_level: DetailLevel) -> T
         data["raw"] = None
         return Transaction.model_validate(data)
 
-    allowed = COUNTERPARTY_FIELDS if detail_level == "counterparty" else MATCHING_FIELDS
+    allowed = COUNTERPARTY_FIELDS if detail_level == "counterparty" else SUMMARY_FIELDS
     for key in data:
         if key not in allowed:
             data[key] = None
