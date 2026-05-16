@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.apps.form import FormInput
+from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 from fastmcp.server.lifespan import lifespan
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,21 +27,41 @@ from models import (
     FindTransactionsResult,
     RateLimitInfo,
     TestConnectionResult,
+    TokenPoolStatus,
+    TokenSummary,
     Transaction,
 )
-from settings import load_settings
+from settings import Settings, load_settings
+
+DetailLevel = Literal["matching", "counterparty", "full", "raw"]
+MAX_PAGE_LIMIT = 500
+_LIVE_CLIENT: FioClient | None = None
 
 
 @lifespan
 async def app_lifespan(_server: FastMCP):
-    client = FioClient(load_settings())
+    global _LIVE_CLIENT
+    client = await _client_from_settings(load_settings())
+    _LIVE_CLIENT = client
     try:
         yield {"fio_client": client}
     finally:
+        _LIVE_CLIENT = None
         await client.aclose()
 
 
 mcp = FastMCP("Fio Bank", lifespan=app_lifespan)
+
+
+async def _client_from_settings(settings: Settings) -> FioClient:
+    client = FioClient(settings)
+    try:
+        for token in settings.startup_tokens():
+            await client.add_token(token.get_secret_value())
+    except Exception:
+        await client.aclose()
+        raise
+    return client
 
 
 class FindTransactionsQuery(BaseModel):
@@ -55,8 +78,7 @@ class FindTransactionsQuery(BaseModel):
                     "variable_symbol": "2026000001",
                     "limit": 100,
                     "cursor": None,
-                    "include_counterparty_details": True,
-                    "include_raw": False,
+                    "detail_level": "matching",
                     "cache": "use",
                 },
                 {
@@ -69,7 +91,7 @@ class FindTransactionsQuery(BaseModel):
         },
     )
 
-    account: str = "main"
+    account: str | None = None
     date_from: date
     date_to: date
     direction: Direction = "any"
@@ -81,10 +103,30 @@ class FindTransactionsQuery(BaseModel):
     message_search: str | None = None
     min_amount: Decimal | None = None
     max_amount: Decimal | None = None
-    limit: int = Field(default=100, ge=1, le=500)
+    limit: int = Field(default=100, ge=1, le=MAX_PAGE_LIMIT)
     cursor: str | None = None
-    include_counterparty_details: bool = True
-    include_raw: bool = False
+    detail_level: DetailLevel | None = Field(
+        default=None,
+        description=(
+            "Controls transaction response fields. matching returns only reconciliation-safe "
+            "fields; counterparty adds structured counterparty fields; full returns normalized "
+            "non-raw fields; raw also exposes raw Fio payloads."
+        ),
+    )
+    include_counterparty_details: bool = Field(
+        default=True,
+        description=(
+            "Deprecated compatibility flag. Prefer detail_level. When detail_level is omitted, "
+            "false maps to detail_level=matching and true maps to detail_level=full."
+        ),
+    )
+    include_raw: bool = Field(
+        default=False,
+        description=(
+            "Deprecated compatibility flag. Prefer detail_level=raw. When detail_level is set, "
+            "this flag is ignored."
+        ),
+    )
     cache: CacheMode = "use"
 
     @model_validator(mode="after")
@@ -93,10 +135,10 @@ class FindTransactionsQuery(BaseModel):
             raise ValueError("date_to must be on or after date_from")
         return self
 
-    def filter_hash(self) -> str:
+    def filter_hash(self, account_key: str | None = None) -> str:
         return _filter_hash(
             {
-                "account": self.account,
+                "account": account_key or self.account,
                 "date_from": self.date_from.isoformat(),
                 "date_to": self.date_to.isoformat(),
                 "direction": self.direction,
@@ -108,21 +150,67 @@ class FindTransactionsQuery(BaseModel):
                 "message_search": self.message_search,
                 "min_amount": str(self.min_amount) if self.min_amount is not None else None,
                 "max_amount": str(self.max_amount) if self.max_amount is not None else None,
-                "include_counterparty_details": self.include_counterparty_details,
-                "include_raw": self.include_raw,
+                "detail_level": self.effective_detail_level(),
+                "include_raw": self.effective_include_raw(),
             }
         )
+
+    def effective_detail_level(self) -> DetailLevel:
+        if self.detail_level is not None:
+            return self.detail_level
+        if self.include_raw:
+            return "raw"
+        return "full" if self.include_counterparty_details else "matching"
+
+    def effective_include_raw(self) -> bool:
+        if self.detail_level is None:
+            return self.include_raw
+        return self.detail_level == "raw"
 
 
 class NewTransactionsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str = "main"
+    account: str | None = None
     confirm_advances_download_marker: bool = False
-    limit: int = Field(default=100, ge=1, le=500)
+    limit: int = Field(default=100, ge=1, le=MAX_PAGE_LIMIT)
     cursor: str | None = None
-    include_raw: bool = False
+    detail_level: DetailLevel | None = Field(
+        default=None,
+        description=(
+            "Controls transaction response fields. matching returns only reconciliation-safe "
+            "fields; counterparty adds structured counterparty fields; full returns normalized "
+            "non-raw fields; raw also exposes raw Fio payloads."
+        ),
+    )
+    include_raw: bool = Field(
+        default=False,
+        description=(
+            "Deprecated compatibility flag. Prefer detail_level=raw. When detail_level is set, "
+            "this flag is ignored."
+        ),
+    )
     cache: CacheMode = "use"
+
+    def effective_detail_level(self) -> DetailLevel:
+        if self.detail_level is not None:
+            return self.detail_level
+        return "raw" if self.include_raw else "full"
+
+    def effective_include_raw(self) -> bool:
+        if self.detail_level is None:
+            return self.include_raw
+        return self.detail_level == "raw"
+
+
+class FioTokenSetup(BaseModel):
+    """Fio API token setup. Stored locally and never returned by Fio MCP."""
+
+    token: str = Field(description="Fio API token from Fio internet banking")
+    alias: str | None = Field(
+        default=None,
+        description="Optional friendly account alias, for example main",
+    )
 
 
 class SearchCursor(BaseModel):
@@ -136,7 +224,32 @@ class SearchCursor(BaseModel):
 
 class ListAccountsResult(BaseModel):
     accounts: list[AccountSummary]
-    rate_limit: dict[str, RateLimitInfo] = Field(default_factory=dict)
+    rate_limit: dict[str, TokenPoolStatus] = Field(default_factory=dict)
+
+
+class AddTokenResult(BaseModel):
+    ok: bool
+    account: str
+    account_key: str
+    alias: str | None = None
+    token_key: str
+    token_count: int
+    added: bool
+
+
+class AliasAccountResult(BaseModel):
+    ok: bool
+    account: str
+    account_key: str
+    alias: str
+
+
+class RemoveTokenResult(BaseModel):
+    ok: bool
+    account: str
+    account_key: str
+    token_count: int
+    removed: bool
 
 
 class MetadataEntry(BaseModel):
@@ -145,31 +258,271 @@ class MetadataEntry(BaseModel):
     description: str | None = None
 
 
+class MetadataLimits(BaseModel):
+    max_page_limit: int
+    max_period_days: int
+    rate_limit_seconds: float
+
+
+class MetadataSideEffect(BaseModel):
+    tool: str
+    side_effect: str
+    guard: str | None = None
+    description: str
+
+
 class MetadataResult(BaseModel):
+    setup_tools: list[str] = Field(default_factory=list)
+    account_selection: dict[str, Any] = Field(default_factory=dict)
     columns: list[MetadataEntry] = Field(default_factory=list)
     error_codes: list[MetadataEntry] = Field(default_factory=list)
     cache_modes: list[MetadataEntry] = Field(default_factory=list)
+    detail_levels: list[MetadataEntry] = Field(default_factory=list)
+    directions: list[MetadataEntry] = Field(default_factory=list)
+    limits: MetadataLimits
+    side_effects: list[MetadataSideEffect] = Field(default_factory=list)
     rate_limit_seconds: float
     max_period_days: int
+
+
+COLUMN_METADATA = [
+    MetadataEntry(code=0, name="posted_date", description="Datum"),
+    MetadataEntry(code=1, name="amount", description="Objem"),
+    MetadataEntry(code=2, name="counterparty_account", description="Protiucet"),
+    MetadataEntry(code=3, name="counterparty_bank_code", description="Kod banky"),
+    MetadataEntry(code=4, name="constant_symbol", description="KS"),
+    MetadataEntry(code=5, name="variable_symbol", description="VS"),
+    MetadataEntry(code=6, name="specific_symbol", description="SS"),
+    MetadataEntry(code=8, name="transaction_type", description="Typ"),
+    MetadataEntry(code=9, name="performer", description="Provedl"),
+    MetadataEntry(code=10, name="counterparty_name", description="Nazev protiuctu"),
+    MetadataEntry(code=12, name="counterparty_bank_name", description="Nazev banky"),
+    MetadataEntry(code=14, name="currency", description="Mena"),
+    MetadataEntry(code=16, name="message", description="Zprava pro prijemce"),
+    MetadataEntry(code=18, name="specification", description="Upresneni"),
+    MetadataEntry(code=22, name="transaction_id", description="ID pohybu"),
+    MetadataEntry(code=25, name="comment", description="Komentar"),
+    MetadataEntry(code=26, name="bic", description="BIC"),
+    MetadataEntry(code=27, name="payer_reference", description="Reference platce"),
+]
+ERROR_CODE_METADATA = [
+    MetadataEntry(
+        code="invalid_token_or_url",
+        name="Invalid token or URL",
+        description="Check the Fio API token and base URL.",
+    ),
+    MetadataEntry(
+        code="rate_limited",
+        name="Fio returned 409 Conflict",
+        description="Retry after the local cooldown or use cache where possible.",
+    ),
+    MetadataEntry(
+        code="too_many_transactions",
+        name="Fio returned 413",
+        description="Reduce the date range or add narrower filters.",
+    ),
+    MetadataEntry(
+        code="invalid_request",
+        name="Fio returned 422",
+        description="Check dates, account configuration, and request parameters.",
+    ),
+    MetadataEntry(
+        code="cache_miss",
+        name="cache=only but no valid cache entry exists",
+        description="Retry with cache=use or refresh if calling Fio is acceptable.",
+    ),
+    MetadataEntry(
+        code="cursor_expired",
+        name="Cursor snapshot expired from memory",
+        description="Repeat the original query to create a fresh cursor snapshot.",
+    ),
+    MetadataEntry(
+        code="confirmation_required",
+        name="last endpoint confirmation missing",
+        description=(
+            "Pass confirm_advances_download_marker=true only when advancing the marker is intended."
+        ),
+    ),
+    MetadataEntry(
+        code="period_too_large",
+        name="Requested date range is too wide",
+        description="Reduce the range or raise FIO_MAX_PERIOD_DAYS intentionally.",
+    ),
+    MetadataEntry(
+        code="invalid_cursor",
+        name="Cursor cannot be decoded",
+        description="Discard the cursor and repeat the original query.",
+    ),
+    MetadataEntry(
+        code="cursor_mismatch",
+        name="Cursor does not match the request",
+        description=(
+            "Repeat the same filters and response-shaping options used to create the cursor."
+        ),
+    ),
+    MetadataEntry(
+        code="unknown_account",
+        name="Unknown configured account",
+        description="Call fio_list_accounts and retry with a listed alias or account_key.",
+    ),
+    MetadataEntry(
+        code="not_configured",
+        name="No Fio account tokens are configured",
+        description="Call fio_add_token first.",
+    ),
+    MetadataEntry(
+        code="ambiguous_account",
+        name="Account parameter is required",
+        description="More than one Fio account is configured; pass account explicitly.",
+    ),
+    MetadataEntry(
+        code="unknown_token",
+        name="Unknown token key",
+        description="Call fio_list_accounts with include_tokens=true and retry.",
+    ),
+    MetadataEntry(
+        code="last_token",
+        name="Cannot remove last account token",
+        description="Add another token before removing this token.",
+    ),
+    MetadataEntry(
+        code="network_error",
+        name="Fio API network request failed",
+        description="Retry after checking connectivity and Fio API availability.",
+    ),
+    MetadataEntry(
+        code="error",
+        name="Unexpected server error",
+        description="Generic fallback for unexpected local failures.",
+    ),
+]
+CACHE_MODE_METADATA = [
+    MetadataEntry(code="use", name="Use cache, call Fio on miss"),
+    MetadataEntry(code="refresh", name="Bypass cache and call Fio"),
+    MetadataEntry(code="only", name="Only use cache; never call Fio"),
+]
+DETAIL_LEVEL_METADATA = [
+    MetadataEntry(
+        code="matching",
+        name="Payment matching fields only",
+        description="No counterparty account, payer name, free text, or raw payload",
+    ),
+    MetadataEntry(
+        code="counterparty",
+        name="Matching plus structured counterparty fields",
+        description="Free-text bank fields and raw payload remain hidden",
+    ),
+    MetadataEntry(
+        code="full",
+        name="All normalized non-raw fields",
+        description="Includes bank free-text fields that may contain payer identity",
+    ),
+    MetadataEntry(
+        code="raw",
+        name="Full plus raw Fio payload",
+        description="Requires the raw Fio response and exposes it in transactions[].raw",
+    ),
+]
+DIRECTION_METADATA = [
+    MetadataEntry(code="incoming", name="Incoming payments"),
+    MetadataEntry(code="outgoing", name="Outgoing payments"),
+    MetadataEntry(code="any", name="Incoming and outgoing payments"),
+]
+SIDE_EFFECT_METADATA = [
+    MetadataSideEffect(
+        tool="fio_get_new_transactions",
+        side_effect="advances_bank_download_marker",
+        guard="confirm_advances_download_marker=true",
+        description=(
+            "Calls Fio's last endpoint, which advances the bank-side last-download marker."
+        ),
+    ),
+]
+
+
+def _add_token_on_submit(setup: FioTokenSetup) -> str:
+    try:
+        client = _LIVE_CLIENT or FioClient(load_settings())
+        close_client = _LIVE_CLIENT is None
+        try:
+            result = client.add_token_sync(setup.token)
+            alias = setup.alias.strip() if setup.alias else None
+            if alias:
+                alias_result = client.alias_account(result.account_key, alias)
+                result = AddTokenResult(
+                    ok=True,
+                    account=alias_result.account,
+                    account_key=alias_result.account_key,
+                    alias=alias_result.alias,
+                    token_key=result.token_key,
+                    token_count=result.token_count,
+                    added=result.added,
+                )
+        finally:
+            if close_client:
+                asyncio.run(client.aclose())
+
+        action = "Added" if result.added else "Already configured"
+        alias_part = f" Alias: {result.alias}." if result.alias else ""
+        return (
+            f"{action} Fio token and paired it to account {result.account}. "
+            f"Token key: {result.token_key}. Token count: {result.token_count}."
+            f"{alias_part}"
+        )
+    except Exception as exc:
+        info = _error_info(exc)
+        return f"{info.code}: {info.message}"
+
+
+mcp.add_provider(
+    FormInput(
+        model=FioTokenSetup,
+        tool_name="fio_add_token",
+        title="Add Fio API Token",
+        submit_text="Add token",
+        on_submit=_add_token_on_submit,
+    )
+)
+
+
+@mcp.tool
+async def fio_alias_account(ctx: Context, account: str, alias: str) -> AliasAccountResult:
+    """Assign a friendly alias to a configured Fio account."""
+    try:
+        result = _client_from_context(ctx).alias_account(account, alias)
+        return AliasAccountResult(**result.__dict__)
+    except Exception as exc:
+        raise _tool_error(exc) from exc
+
+
+@mcp.tool
+async def fio_remove_token(ctx: Context, account: str, token_key: str) -> RemoveTokenResult:
+    """Remove a configured token by its safe token_key from fio_list_accounts."""
+    try:
+        result = _client_from_context(ctx).remove_token(account, token_key)
+        return RemoveTokenResult(**result.__dict__)
+    except Exception as exc:
+        raise _tool_error(exc) from exc
 
 
 @mcp.tool
 async def fio_list_accounts(
     ctx: Context,
-    include_status: bool = False,
+    include_tokens: bool = True,
+    include_status: bool = True,
 ) -> ListAccountsResult:
-    """List configured Fio account aliases. Tokens are never returned."""
+    """List configured Fio accounts and safe token keys. Raw tokens are never returned."""
     client = _client_from_context(ctx)
-    return _list_accounts(client, include_status=include_status)
+    return _list_accounts(client, include_tokens=include_tokens, include_status=include_status)
 
 
 @mcp.tool
 async def fio_test_connection(
     ctx: Context,
-    account: str = "main",
+    account: str | None = None,
     cache: CacheMode = "use",
 ) -> TestConnectionResult:
-    """Verify that a configured Fio account token can read the API."""
+    """Verify that a configured Fio account token pool can read the API."""
     return await _test_connection(_client_from_context(ctx), account=account, cache=cache)
 
 
@@ -207,42 +560,28 @@ async def fio_get_new_transactions(
 
 @mcp.tool
 async def fio_get_metadata(ctx: Context) -> MetadataResult:
-    """Return Fio transaction column, cache, error, and rate-limit metadata."""
-    client = _client_from_context(ctx)
+    """Return Fio transaction column, detail level, cache, error, and rate-limit metadata."""
+    return _metadata_result(_client_from_context(ctx))
+
+
+def _metadata_result(client: FioClient) -> MetadataResult:
     return MetadataResult(
-        columns=[
-            MetadataEntry(code=0, name="posted_date", description="Datum"),
-            MetadataEntry(code=1, name="amount", description="Objem"),
-            MetadataEntry(code=2, name="counterparty_account", description="Protiucet"),
-            MetadataEntry(code=3, name="counterparty_bank_code", description="Kod banky"),
-            MetadataEntry(code=4, name="constant_symbol", description="KS"),
-            MetadataEntry(code=5, name="variable_symbol", description="VS"),
-            MetadataEntry(code=6, name="specific_symbol", description="SS"),
-            MetadataEntry(code=8, name="transaction_type", description="Typ"),
-            MetadataEntry(code=9, name="performer", description="Provedl"),
-            MetadataEntry(code=10, name="counterparty_name", description="Nazev protiuctu"),
-            MetadataEntry(code=12, name="counterparty_bank_name", description="Nazev banky"),
-            MetadataEntry(code=14, name="currency", description="Mena"),
-            MetadataEntry(code=16, name="message", description="Zprava pro prijemce"),
-            MetadataEntry(code=18, name="specification", description="Upresneni"),
-            MetadataEntry(code=22, name="transaction_id", description="ID pohybu"),
-            MetadataEntry(code=25, name="comment", description="Komentar"),
-            MetadataEntry(code=26, name="bic", description="BIC"),
-            MetadataEntry(code=27, name="payer_reference", description="Reference platce"),
-        ],
-        error_codes=[
-            MetadataEntry(code="invalid_token_or_url", name="Invalid token or URL"),
-            MetadataEntry(code="rate_limited", name="Fio returned 409 Conflict"),
-            MetadataEntry(code="too_many_transactions", name="Fio returned 413"),
-            MetadataEntry(code="invalid_request", name="Fio returned 422"),
-            MetadataEntry(code="cache_miss", name="cache=only but no valid cache entry exists"),
-            MetadataEntry(code="cursor_expired", name="Cursor snapshot expired from memory"),
-        ],
-        cache_modes=[
-            MetadataEntry(code="use", name="Use cache, call Fio on miss"),
-            MetadataEntry(code="refresh", name="Bypass cache and call Fio"),
-            MetadataEntry(code="only", name="Only use cache; never call Fio"),
-        ],
+        setup_tools=["fio_add_token", "fio_alias_account", "fio_remove_token"],
+        account_selection={
+            "omitted_account_allowed_when": "exactly one account is configured",
+            "accepted_account_values": ["alias", "account_key"],
+        },
+        columns=COLUMN_METADATA,
+        error_codes=ERROR_CODE_METADATA,
+        cache_modes=CACHE_MODE_METADATA,
+        detail_levels=DETAIL_LEVEL_METADATA,
+        directions=DIRECTION_METADATA,
+        limits=MetadataLimits(
+            max_page_limit=MAX_PAGE_LIMIT,
+            max_period_days=client.max_period_days(),
+            rate_limit_seconds=client.rate_limit_seconds(),
+        ),
+        side_effects=SIDE_EFFECT_METADATA,
         rate_limit_seconds=client.rate_limit_seconds(),
         max_period_days=client.max_period_days(),
     )
@@ -252,22 +591,64 @@ def _client_from_context(ctx: Context) -> FioClient:
     return ctx.lifespan_context["fio_client"]
 
 
-def _list_accounts(client: FioClient, *, include_status: bool) -> ListAccountsResult:
+def _tool_error(exc: Exception) -> ToolError:
+    info = _error_info(exc)
+    return ToolError(f"{info.code}: {info.message}")
+
+
+def _token_available(client: FioClient, token_key: str) -> bool:
+    next_available = client.token_rate_limit_status(token_key).next_available_at
+    return next_available is None or next_available <= datetime.now(UTC)
+
+
+def _list_accounts(
+    client: FioClient,
+    *,
+    include_tokens: bool,
+    include_status: bool,
+) -> ListAccountsResult:
     accounts = [
-        AccountSummary(alias=account.alias, label=account.label, configured=True)
+        AccountSummary(
+            account=account.handle,
+            account_key=account.account_key,
+            alias=account.alias,
+            account_id=account.account_id,
+            bank_id=account.bank_id,
+            currency=account.currency,
+            iban=account.iban,
+            bic=account.bic,
+            token_count=len(account.tokens),
+            marker_token_key=account.marker_token_key,
+            configured=True,
+            tokens=[
+                TokenSummary(
+                    token_key=token.token_key,
+                    role="marker" if token.token_key == account.marker_token_key else "read",
+                    available=_token_available(client, token.token_key) if include_status else None,
+                    next_available_at=client.token_rate_limit_status(
+                        token.token_key
+                    ).next_available_at
+                    if include_status
+                    else None,
+                )
+                for token in account.tokens
+            ]
+            if include_tokens
+            else [],
+        )
         for account in client.accounts()
     ]
-    rate_limit = {}
+    rate_limit: dict[str, TokenPoolStatus] = {}
     if include_status:
         for account in client.accounts():
-            rate_limit[account.alias] = client.rate_limit_status(account.alias)
+            rate_limit[account.handle] = client.rate_limit_status(account.account_key)
     return ListAccountsResult(accounts=accounts, rate_limit=rate_limit)
 
 
 async def _test_connection(
     client: FioClient,
     *,
-    account: str,
+    account: str | None,
     cache: CacheMode,
 ) -> TestConnectionResult:
     try:
@@ -304,7 +685,15 @@ async def _find_transactions(
             ),
         )
 
-    filter_hash = query.filter_hash()
+    try:
+        resolved_account = client.account(query.account)
+    except Exception as exc:
+        return FindTransactionsResult(
+            cache=CacheInfo(mode=query.cache, hit=False),
+            error=_error_info(exc),
+        )
+
+    filter_hash = query.filter_hash(resolved_account.account_key)
     if query.cursor:
         return _page_from_cursor(
             client,
@@ -312,18 +701,19 @@ async def _find_transactions(
             expected_kind="period",
             expected_filter_hash=filter_hash,
             limit=query.limit,
-            include_counterparty_details=query.include_counterparty_details,
+            detail_level=query.effective_detail_level(),
             cache_mode=query.cache,
             query=query,
         )
 
     try:
+        include_raw = query.effective_include_raw()
         result = await client.period(
-            query.account,
+            resolved_account.account_key,
             query.date_from,
             query.date_to,
             cache_mode=query.cache,
-            include_raw=query.include_raw,
+            include_raw=include_raw,
         )
     except FioCacheMiss as exc:
         return FindTransactionsResult(
@@ -343,16 +733,16 @@ async def _find_transactions(
         cache=result.cache,
         rate_limit=result.rate_limit,
         cache_key=period_cache_key(
-            query.account,
+            resolved_account.account_key,
             query.date_from,
             query.date_to,
-            include_raw=query.include_raw,
+            include_raw=query.effective_include_raw(),
         ),
         kind="period",
         filter_hash=filter_hash,
         offset=0,
         limit=query.limit,
-        include_counterparty_details=query.include_counterparty_details,
+        detail_level=query.effective_detail_level(),
     )
 
 
@@ -372,10 +762,19 @@ async def _get_new_transactions(
             ),
         )
 
+    try:
+        resolved_account = client.account(request.account)
+    except Exception as exc:
+        return FindTransactionsResult(
+            cache=CacheInfo(mode=request.cache, hit=False),
+            error=_error_info(exc),
+        )
+
     filter_hash = _filter_hash(
         {
-            "account": request.account,
-            "include_raw": request.include_raw,
+            "account": resolved_account.account_key,
+            "detail_level": request.effective_detail_level(),
+            "include_raw": request.effective_include_raw(),
         }
     )
     if request.cursor:
@@ -385,15 +784,16 @@ async def _get_new_transactions(
             expected_kind="last",
             expected_filter_hash=filter_hash,
             limit=request.limit,
-            include_counterparty_details=True,
+            detail_level=request.effective_detail_level(),
             cache_mode=request.cache,
         )
 
     try:
+        include_raw = request.effective_include_raw()
         result = await client.last(
-            request.account,
+            resolved_account.account_key,
             cache_mode=request.cache,
-            include_raw=request.include_raw,
+            include_raw=include_raw,
         )
     except FioCacheMiss as exc:
         return FindTransactionsResult(
@@ -411,12 +811,15 @@ async def _get_new_transactions(
         transactions=result.statement.transactions,
         cache=result.cache,
         rate_limit=result.rate_limit,
-        cache_key=last_cache_key(request.account, include_raw=request.include_raw),
+        cache_key=last_cache_key(
+            resolved_account.account_key,
+            include_raw=request.effective_include_raw(),
+        ),
         kind="last",
         filter_hash=filter_hash,
         offset=0,
         limit=request.limit,
-        include_counterparty_details=True,
+        detail_level=request.effective_detail_level(),
     )
 
 
@@ -427,7 +830,7 @@ def _page_from_cursor(
     expected_kind: Literal["period", "last"],
     expected_filter_hash: str,
     limit: int,
-    include_counterparty_details: bool,
+    detail_level: DetailLevel,
     cache_mode: CacheMode,
     query: FindTransactionsQuery | None = None,
 ) -> FindTransactionsResult:
@@ -463,7 +866,7 @@ def _page_from_cursor(
         filter_hash=parsed.filter_hash,
         offset=parsed.offset,
         limit=limit,
-        include_counterparty_details=include_counterparty_details,
+        detail_level=detail_level,
     )
 
 
@@ -541,11 +944,10 @@ def _page_result(
     filter_hash: str,
     offset: int,
     limit: int,
-    include_counterparty_details: bool,
+    detail_level: DetailLevel,
 ) -> FindTransactionsResult:
     page = transactions[offset : offset + limit]
-    if not include_counterparty_details:
-        page = [_redact_counterparty(transaction) for transaction in page]
+    page = [_shape_transaction(transaction, detail_level) for transaction in page]
     next_offset = offset + limit
     next_cursor = None
     if next_offset < len(transactions):
@@ -568,16 +970,40 @@ def _page_result(
     )
 
 
-def _redact_counterparty(transaction: Transaction) -> Transaction:
+MATCHING_FIELDS = {
+    "transaction_id",
+    "posted_date",
+    "amount",
+    "currency",
+    "direction",
+    "constant_symbol",
+    "variable_symbol",
+    "specific_symbol",
+    "transaction_type",
+    "order_id",
+}
+COUNTERPARTY_FIELDS = MATCHING_FIELDS | {
+    "counterparty_account",
+    "counterparty_bank_code",
+    "counterparty_bank_name",
+    "counterparty_name",
+    "bic",
+    "payer_reference",
+}
+
+
+def _shape_transaction(transaction: Transaction, detail_level: DetailLevel) -> Transaction:
     data = transaction.model_dump()
-    for key in (
-        "counterparty_account",
-        "counterparty_bank_code",
-        "counterparty_bank_name",
-        "counterparty_name",
-        "bic",
-    ):
-        data[key] = None
+    if detail_level == "raw":
+        return Transaction.model_validate(data)
+    if detail_level == "full":
+        data["raw"] = None
+        return Transaction.model_validate(data)
+
+    allowed = COUNTERPARTY_FIELDS if detail_level == "counterparty" else MATCHING_FIELDS
+    for key in data:
+        if key not in allowed:
+            data[key] = None
     return Transaction.model_validate(data)
 
 

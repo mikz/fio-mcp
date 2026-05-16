@@ -16,14 +16,37 @@ class ErrorInfo(BaseModel):
 
 
 class AccountSummary(BaseModel):
-    alias: str
-    label: str | None = None
+    account: str
+    account_key: str
+    alias: str | None = None
+    account_id: str
+    bank_id: str | None = None
+    currency: str | None = None
+    iban: str | None = None
+    bic: str | None = None
+    token_count: int
+    marker_token_key: str
     configured: bool = True
+    tokens: list[TokenSummary] = Field(default_factory=list)
+
+
+class TokenSummary(BaseModel):
+    token_key: str
+    role: Literal["marker", "read"]
+    available: bool | None = None
+    next_available_at: datetime | None = None
+
+
+class TokenPoolStatus(BaseModel):
+    token_count: int
+    available_tokens: int
+    next_available_at: datetime | None = None
 
 
 class AccountInfo(BaseModel):
-    alias: str
-    label: str | None = None
+    account: str | None = None
+    account_key: str | None = None
+    alias: str | None = None
     account_id: str | None = None
     bank_id: str | None = None
     currency: str | None = None

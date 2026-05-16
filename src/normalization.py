@@ -30,8 +30,9 @@ def normalize_statement(
 
     return AccountStatement(
         account=AccountInfo(
+            account=account.handle,
+            account_key=account.account_key,
             alias=account.alias,
-            label=account.label,
             account_id=_string_or_none(info.get("accountId")),
             bank_id=_string_or_none(info.get("bankId")),
             currency=_string_or_none(info.get("currency")),

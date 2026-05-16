@@ -5,10 +5,10 @@ from datetime import date
 
 import pytest
 
-from client import FioClient
 from server import (
     FindTransactionsQuery,
     NewTransactionsRequest,
+    _client_from_settings,
     _find_transactions,
     _get_new_transactions,
 )
@@ -24,7 +24,7 @@ def live_settings() -> Settings:
 
 
 async def test_live_period_call_and_memory_cache() -> None:
-    client = FioClient(live_settings())
+    client = await _client_from_settings(live_settings())
     today = date.today()
     query = FindTransactionsQuery(
         account=os.environ.get("FIO_E2E_ACCOUNT", "main"),
@@ -49,7 +49,7 @@ async def test_live_period_call_and_memory_cache() -> None:
 
 
 async def test_live_cache_only_miss_does_not_call_fio() -> None:
-    client = FioClient(live_settings())
+    client = await _client_from_settings(live_settings())
 
     result = await _find_transactions(
         client,
@@ -71,7 +71,7 @@ async def test_live_last_endpoint_requires_explicit_opt_in() -> None:
     if os.environ.get("FIO_E2E_ALLOW_LAST") != "1":
         pytest.skip("Set FIO_E2E_ALLOW_LAST=1 to run the marker-advancing live test")
 
-    client = FioClient(Settings())
+    client = await _client_from_settings(Settings())
     result = await _get_new_transactions(
         client,
         NewTransactionsRequest(

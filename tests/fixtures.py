@@ -2,6 +2,28 @@ from __future__ import annotations
 
 from typing import Any
 
+from settings import FioAccount, FioAccountToken
+
+
+def sample_account(
+    *,
+    alias: str | None = "main",
+    token: str = "token-for-test",
+    token_key: str = "aaaabbbbccccdddd",
+    account_key: str = "2603445200-2010-CZK",
+) -> FioAccount:
+    return FioAccount(
+        account_key=account_key,
+        alias=alias,
+        account_id="2603445200",
+        bank_id="2010",
+        currency="CZK",
+        iban="CZ6508000000192000145399",
+        bic="FIOBCZPPXXX",
+        tokens=[FioAccountToken(token_key=token_key, token=token)],
+        marker_token_key=token_key,
+    )
+
 
 def sample_fio_response(transactions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
@@ -34,6 +56,9 @@ def sample_transaction(
     variable_symbol: str = "2026000001",
     counterparty_name: str = "Jana Novakova",
     message: str = "Clenstvi",
+    user_identification: str = "Jana Novakova",
+    comment: str = "Internal note",
+    payer_reference: str = "RF18539007547034",
 ) -> dict[str, Any]:
     return {
         "column22": {"value": transaction_id, "name": "ID pohybu", "id": 22},
@@ -43,11 +68,13 @@ def sample_transaction(
         "column2": {"value": "123456789", "name": "Protiucet", "id": 2},
         "column3": {"value": "2010", "name": "Kod banky", "id": 3},
         "column5": {"value": variable_symbol, "name": "VS", "id": 5},
+        "column7": {"value": user_identification, "name": "Uzivatelska identifikace", "id": 7},
         "column9": {"value": "Jana Novakova", "name": "Provedl", "id": 9},
         "column10": {"value": counterparty_name, "name": "Nazev protiuctu", "id": 10},
         "column12": {"value": "Fio banka", "name": "Nazev banky", "id": 12},
         "column16": {"value": message, "name": "Zprava pro prijemce", "id": 16},
-        "column25": {"value": "Internal note", "name": "Komentar", "id": 25},
+        "column17": {"value": "39825209552", "name": "ID pokynu", "id": 17},
+        "column25": {"value": comment, "name": "Komentar", "id": 25},
         "column26": {"value": "FIOBCZPPXXX", "name": "BIC", "id": 26},
-        "column27": {"value": "RF18539007547034", "name": "Reference platce", "id": 27},
+        "column27": {"value": payer_reference, "name": "Reference platce", "id": 27},
     }
