@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from rate_limit import TokenRateLimiter
+from rate_limit import RateLimitWaitRequired, TokenRateLimiter
 
 
 async def test_same_token_waits_for_reserved_window() -> None:
@@ -57,6 +57,28 @@ async def test_acquire_any_uses_available_token_before_waiting() -> None:
 
     assert first.token_key == "token-a"
     assert second.token_key == "token-b"
+    assert sleeps == []
+
+
+async def test_acquire_any_raises_when_wait_exceeds_max() -> None:
+    now = datetime(2026, 5, 16, tzinfo=UTC)
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    limiter = TokenRateLimiter(cooldown_seconds=31, now=lambda: now, sleep=sleep)
+
+    await limiter.acquire_any(["token-a"])
+
+    try:
+        await limiter.acquire_any(["token-a"], max_wait_seconds=0)
+    except RateLimitWaitRequired as exc:
+        assert exc.wait_seconds == 31
+        assert exc.next_available_at == datetime(2026, 5, 16, 0, 0, 31, tzinfo=UTC)
+    else:
+        raise AssertionError("Expected RateLimitWaitRequired")
+
     assert sleeps == []
 
 

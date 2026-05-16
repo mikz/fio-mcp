@@ -14,23 +14,30 @@ only     return cache only; never call Fio
 ```
 
 `cache: "only"` returns `cache_miss` when no valid in-memory snapshot exists.
+Raw cached `periods` and `last` responses may satisfy later non-raw reads for
+the same account/date endpoint. Non-raw cache entries never satisfy raw reads.
+Pass `max_wait_seconds` on read tools when a call should return
+`rate_limit_wait_required` instead of waiting longer than allowed for the local
+token cooldown.
 
 ## Detail Levels
 
 Transaction tools support explicit response shaping through `detail_level`:
 
 ```text
-summary       payment summary fields only; hides names, accounts, free text, and raw payloads
-counterparty  summary fields plus structured counterparty account/name/bank fields
+summary       payment summary fields only; hides names, free text, and raw payloads
+counterparty  summary fields plus structured counterparty name
 full          all normalized non-raw fields, including bank free text
 raw           full plus the raw Fio transaction payload
 ```
 
 For pairing with SimpleShop or Darujme, prefer `detail_level: "summary"`.
 It returns `transaction_id`, dates, amount, currency, direction, payment symbols,
-transaction type, and bank order ID. It intentionally omits `message`,
-`comment`, `user_identification`, and payer reference because banks can place
-customer names in those fields.
+canonical `counterparty_bank_account`, transaction type, and bank order ID.
+Amounts are returned as fixed two-decimal strings in JSON, for example
+`"1926.00"`. Bank accounts are returned as `account/bank_code`, for example
+`"2198370339/0800"`. Summary intentionally omits `message`, `comment`, and
+`user_identification` because banks can place customer names in those fields.
 
 `detail_level` is the only response-shaping input. Use `detail_level: "raw"` to
 include raw Fio payloads; the old compatibility flags are not accepted.
@@ -40,7 +47,7 @@ include raw Fio payloads; the old compatibility flags are not accepted.
 Collects a Fio API token through one setup tool. `mode` accepts `auto`,
 `direct`, `prefab`, or `web`. `auto` uses Prefab when the MCP client advertises
 Apps UI support, otherwise it returns a localhost web-login URL. `direct` accepts
-the token and optional alias in the `credentials` object.
+`token` and optional `alias` in the `credentials` object passed in the tool call.
 
 ```json
 {
@@ -67,8 +74,8 @@ Response:
 ```json
 {
   "ok": true,
-  "account": "2603445200-2010-CZK",
-  "account_key": "2603445200-2010-CZK",
+  "account": "2603445200/2010",
+  "bank_account": "2603445200/2010",
   "alias": null,
   "token_key": "a1b2c3d4e5f6a7b8",
   "token_count": 1,
@@ -86,11 +93,11 @@ startup tokens are validated and paired to accounts at runtime.
 ## `fio_alias_account`
 
 Assigns a friendly alias to an account. `account` can be either the current
-alias or the canonical `account_key` from `fio_list_accounts`.
+alias or the canonical `bank_account` from `fio_list_accounts`.
 
 ```json
 {
-  "account": "2603445200-2010-CZK",
+  "account": "2603445200/2010",
   "alias": "main"
 }
 ```
@@ -128,18 +135,13 @@ Example account entry:
 ```json
 {
   "account": "main",
-  "account_key": "2603445200-2010-CZK",
   "alias": "main",
-  "account_id": "2603445200",
-  "bank_id": "2010",
+  "bank_account": "2603445200/2010",
   "currency": "CZK",
   "token_count": 2,
-  "marker_token_key": "a1b2c3d4e5f6a7b8",
-  "configured": true,
   "tokens": [
     {
       "token_key": "a1b2c3d4e5f6a7b8",
-      "role": "marker",
       "available": true,
       "next_available_at": null
     }
@@ -173,6 +175,7 @@ advance the bank-side last-download marker.
     "direction": "incoming",
     "currency": "CZK",
     "variable_symbol": "2026000001",
+    "counterparty_bank_account": "2198370339/0800",
     "counterparty_search": "Novak",
     "min_amount": "100.00",
     "max_amount": "1000.00",
@@ -187,6 +190,11 @@ advance the bank-side last-download marker.
 If exactly one account is configured, `account` can be omitted. If more than one
 account is configured, omitted account selection returns `ambiguous_account`.
 Safe period reads load-balance across the account's token pool.
+
+Fio's download endpoint only accepts account token, date range, and output
+format. Field filters such as variable symbol, amount, direction, currency,
+counterparty bank account, and message text are applied locally by this MCP
+after the bounded `periods` read.
 
 Date ranges are capped by `FIO_MAX_PERIOD_DAYS` to avoid expensive failed calls
 under Fio's rate limit. Raise that setting when a wider period is intentional.
@@ -210,7 +218,7 @@ download marker, so confirmation is required.
 ```
 
 Without `confirm_advances_download_marker: true`, the tool returns
-`confirmation_required`. This tool uses only the account's `marker_token_key`;
+`confirmation_required`. This tool uses the account's marker token internally;
 it does not load-balance across read tokens.
 
 ## `fio_get_metadata`
@@ -229,6 +237,7 @@ The `limits` object includes:
 max_page_limit      maximum accepted limit for paged transaction responses
 max_period_days     maximum accepted Fio period range
 rate_limit_seconds  local per-token cooldown
+max_wait_seconds    per-call option to avoid waiting longer than allowed
 ```
 
 The `side_effects` list identifies guarded operations. Currently only
@@ -245,10 +254,11 @@ invalid_request        check dates, account config, and request parameters
 cache_miss             cache=only has no valid in-memory snapshot
 cursor_expired         repeat the original query to create a fresh cursor
 confirmation_required  last endpoint requires explicit marker confirmation
-period_too_large       reduce range or raise FIO_MAX_PERIOD_DAYS intentionally
+period_too_large       reduce range or follow suggested_date_chunks
+rate_limit_wait_required retry after retry_after_seconds or use existing cache
 invalid_cursor         discard cursor and repeat the original query
 cursor_mismatch        repeat the exact filters used to create the cursor
-unknown_account        call fio_list_accounts and retry with alias or account_key
+unknown_account        call fio_list_accounts and retry with alias or bank_account
 not_configured         call fio_login first
 ambiguous_account      pass account because multiple accounts are configured
 unknown_token          call fio_list_accounts with include_tokens=true

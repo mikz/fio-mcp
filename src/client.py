@@ -11,7 +11,7 @@ from pydantic import SecretStr
 from cache import ResponseCache
 from models import AccountStatement, CacheInfo, CacheMode, RateLimitInfo, TokenPoolStatus
 from normalization import normalize_statement
-from rate_limit import TokenRateLimiter
+from rate_limit import RateLimitWaitRequired, TokenRateLimiter
 from settings import FioAccount, FioAccountToken, Settings, store_accounts
 
 
@@ -23,11 +23,15 @@ class FioApiError(RuntimeError):
         code: str,
         status_code: int | None = None,
         payload: Any = None,
+        retry_after_seconds: float | None = None,
+        next_available_at: datetime | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
         self.payload = payload
+        self.retry_after_seconds = retry_after_seconds
+        self.next_available_at = next_available_at
 
 
 class FioCacheMiss(RuntimeError):
@@ -48,6 +52,7 @@ class AddTokenResult:
     ok: bool
     account: str
     account_key: str
+    bank_account: str | None
     alias: str | None
     token_key: str
     token_count: int
@@ -59,6 +64,7 @@ class AliasAccountResult:
     ok: bool
     account: str
     account_key: str
+    bank_account: str | None
     alias: str
 
 
@@ -67,6 +73,7 @@ class RemoveTokenResult:
     ok: bool
     account: str
     account_key: str
+    bank_account: str | None
     token_count: int
     removed: bool
 
@@ -128,13 +135,20 @@ class FioClient:
 
         handle = handle.strip()
         account_key = self._aliases.get(handle, handle)
-        try:
+        if account_key in self._accounts_by_key:
             return self._accounts_by_key[account_key]
-        except KeyError as exc:
+        matches = [account for account in self.accounts() if account.bank_account == handle]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
             raise FioApiError(
-                f"Unknown Fio account: {handle}",
-                code="unknown_account",
-            ) from exc
+                f"Multiple Fio accounts use bank account {handle}; pass alias.",
+                code="ambiguous_account",
+            )
+        raise FioApiError(
+            f"Unknown Fio account: {handle}",
+            code="unknown_account",
+        )
 
     def cache(self) -> ResponseCache:
         return self._cache
@@ -163,6 +177,7 @@ class FioClient:
                 ok=True,
                 account=existing.handle,
                 account_key=existing.account_key,
+                bank_account=existing.bank_account,
                 alias=existing.alias,
                 token_key=token_key,
                 token_count=len(existing.tokens),
@@ -183,6 +198,7 @@ class FioClient:
                 ok=True,
                 account=existing.handle,
                 account_key=existing.account_key,
+                bank_account=existing.bank_account,
                 alias=existing.alias,
                 token_key=token_key,
                 token_count=len(existing.tokens),
@@ -237,6 +253,7 @@ class FioClient:
             ok=True,
             account=updated.handle,
             account_key=updated.account_key,
+            bank_account=updated.bank_account,
             alias=updated.alias,
             token_key=token_key,
             token_count=len(updated.tokens),
@@ -274,6 +291,7 @@ class FioClient:
             ok=True,
             account=updated.handle,
             account_key=updated.account_key,
+            bank_account=updated.bank_account,
             alias=alias,
         )
 
@@ -300,6 +318,7 @@ class FioClient:
             ok=True,
             account=updated.handle,
             account_key=updated.account_key,
+            bank_account=updated.bank_account,
             token_count=len(updated.tokens),
             removed=True,
         )
@@ -309,9 +328,17 @@ class FioClient:
         handle: str | None = None,
         *,
         cache_mode: CacheMode,
+        max_wait_seconds: float | None = None,
     ) -> FioReadResult:
         today = date.today()
-        return await self.period(handle, today, today, cache_mode=cache_mode, include_raw=False)
+        return await self.period(
+            handle,
+            today,
+            today,
+            cache_mode=cache_mode,
+            include_raw=False,
+            max_wait_seconds=max_wait_seconds,
+        )
 
     async def period(
         self,
@@ -321,6 +348,7 @@ class FioClient:
         *,
         cache_mode: CacheMode,
         include_raw: bool,
+        max_wait_seconds: float | None = None,
     ) -> FioReadResult:
         account = self.account(handle)
         key = period_cache_key(account.account_key, date_from, date_to, include_raw=include_raw)
@@ -340,6 +368,7 @@ class FioClient:
             ttl_seconds=ttl,
             include_raw=include_raw,
             retry_with_pool=True,
+            max_wait_seconds=max_wait_seconds,
         )
 
     async def last(
@@ -348,6 +377,7 @@ class FioClient:
         *,
         cache_mode: CacheMode,
         include_raw: bool,
+        max_wait_seconds: float | None = None,
     ) -> FioReadResult:
         account = self.account(handle)
         token = self._marker_token(account)
@@ -363,6 +393,7 @@ class FioClient:
             ttl_seconds=self._settings.fio_cache_ttl_last_seconds,
             include_raw=include_raw,
             retry_with_pool=False,
+            max_wait_seconds=max_wait_seconds,
         )
 
     async def _read(
@@ -376,9 +407,14 @@ class FioClient:
         ttl_seconds: int,
         include_raw: bool,
         retry_with_pool: bool,
+        max_wait_seconds: float | None,
     ) -> FioReadResult:
         if cache_mode != "refresh":
             cached, cache_info = self._cache.get(cache_key, mode=cache_mode)
+            if cached is None and not include_raw:
+                raw_cache_key = _raw_cache_key(cache_key)
+                if raw_cache_key != cache_key:
+                    cached, cache_info = self._cache.get(raw_cache_key, mode=cache_mode)
             if cached is not None:
                 status = self._limiter.status_many([token.token_key for token in tokens])
                 return FioReadResult(
@@ -403,7 +439,21 @@ class FioClient:
             available = [
                 token_key for token_key in token_by_key if token_key not in used_token_keys
             ] or list(token_by_key)
-            lease = await self._limiter.acquire_any(available)
+            try:
+                lease = await self._limiter.acquire_any(
+                    available,
+                    max_wait_seconds=max_wait_seconds,
+                )
+            except RateLimitWaitRequired as exc:
+                raise FioApiError(
+                    (
+                        "Fio rate limit wait exceeds max_wait_seconds; retry later "
+                        "or use cache=only/use with an existing cached response."
+                    ),
+                    code="rate_limit_wait_required",
+                    retry_after_seconds=exc.wait_seconds,
+                    next_available_at=exc.next_available_at,
+                ) from exc
             selected = token_by_key[lease.token_key]
             used_token_keys.add(lease.token_key)
             rate_info = _merge_rate_info(rate_info, lease.rate_limit)
@@ -526,6 +576,10 @@ def period_cache_key(account: str, date_from: date, date_to: date, *, include_ra
 
 def last_cache_key(account: str, *, include_raw: bool) -> str:
     return f"last:{account}:raw={int(include_raw)}"
+
+
+def _raw_cache_key(cache_key: str) -> str:
+    return cache_key[:-1] + "1" if cache_key.endswith(":raw=0") else cache_key
 
 
 def token_key_from_secret(token: str) -> str:

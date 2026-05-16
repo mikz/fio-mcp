@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 CacheMode = Literal["use", "refresh", "only"]
 Direction = Literal["incoming", "outgoing", "any"]
@@ -13,26 +13,23 @@ Direction = Literal["incoming", "outgoing", "any"]
 class ErrorInfo(BaseModel):
     code: str
     message: str
+    retry_after_seconds: float | None = None
+    next_available_at: datetime | None = None
+    suggested_date_chunks: list[dict[str, str]] = Field(default_factory=list)
 
 
 class AccountSummary(BaseModel):
     account: str
-    account_key: str
     alias: str | None = None
-    account_id: str
-    bank_id: str | None = None
+    bank_account: str | None = None
     currency: str | None = None
     iban: str | None = None
-    bic: str | None = None
     token_count: int
-    marker_token_key: str
-    configured: bool = True
     tokens: list[TokenSummary] = Field(default_factory=list)
 
 
 class TokenSummary(BaseModel):
     token_key: str
-    role: Literal["marker", "read"]
     available: bool | None = None
     next_available_at: datetime | None = None
 
@@ -45,19 +42,20 @@ class TokenPoolStatus(BaseModel):
 
 class AccountInfo(BaseModel):
     account: str | None = None
-    account_key: str | None = None
     alias: str | None = None
-    account_id: str | None = None
-    bank_id: str | None = None
+    bank_account: str | None = None
     currency: str | None = None
     iban: str | None = None
-    bic: str | None = None
     opening_balance: Decimal | None = None
     closing_balance: Decimal | None = None
     date_start: str | None = None
     date_end: str | None = None
     id_from: int | None = None
     id_to: int | None = None
+
+    @field_serializer("opening_balance", "closing_balance", when_used="json")
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return _format_decimal(value)
 
 
 class Transaction(BaseModel):
@@ -68,9 +66,7 @@ class Transaction(BaseModel):
     amount: Decimal
     currency: str | None = None
     direction: Literal["incoming", "outgoing"]
-    counterparty_account: str | None = None
-    counterparty_bank_code: str | None = None
-    counterparty_bank_name: str | None = None
+    counterparty_bank_account: str | None = None
     counterparty_name: str | None = None
     constant_symbol: str | None = None
     variable_symbol: str | None = None
@@ -78,13 +74,14 @@ class Transaction(BaseModel):
     user_identification: str | None = None
     message: str | None = None
     transaction_type: str | None = None
-    performer: str | None = None
     specification: str | None = None
     comment: str | None = None
-    bic: str | None = None
     order_id: str | None = None
-    payer_reference: str | None = None
     raw: dict[str, Any] | None = None
+
+    @field_serializer("amount", when_used="json")
+    def serialize_amount(self, value: Decimal) -> str:
+        return _format_decimal(value) or "0.00"
 
 
 class AccountStatement(BaseModel):
@@ -129,3 +126,9 @@ class TestConnectionResult(BaseModel):
     cache: CacheInfo
     rate_limit: RateLimitInfo = Field(default_factory=RateLimitInfo)
     error: ErrorInfo | None = None
+
+
+def _format_decimal(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return str(value.quantize(Decimal("0.01")))

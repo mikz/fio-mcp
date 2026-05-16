@@ -31,13 +31,13 @@ def normalize_statement(
     return AccountStatement(
         account=AccountInfo(
             account=account.handle,
-            account_key=account.account_key,
             alias=account.alias,
-            account_id=_string_or_none(info.get("accountId")),
-            bank_id=_string_or_none(info.get("bankId")),
+            bank_account=_bank_account(
+                _string_or_none(info.get("accountId")),
+                _string_or_none(info.get("bankId")),
+            ),
             currency=_string_or_none(info.get("currency")),
             iban=_string_or_none(info.get("iban")),
-            bic=_string_or_none(info.get("bic")),
             opening_balance=_decimal_or_none(info.get("openingBalance")),
             closing_balance=_decimal_or_none(info.get("closingBalance")),
             date_start=_date_string_or_none(info.get("dateStart")),
@@ -55,15 +55,15 @@ def normalize_statement(
 
 def normalize_transaction(raw: dict[str, Any], *, include_raw: bool = False) -> Transaction:
     amount = _decimal_or_none(_column(raw, 1)) or Decimal("0")
+    counterparty_account = _string_or_none(_column(raw, 2))
+    counterparty_bank_code = _string_or_none(_column(raw, 3))
     return Transaction(
         transaction_id=_string_or_none(_column(raw, 22)) or "",
         posted_date=_date_string_or_none(_column(raw, 0)),
         amount=amount,
         currency=_string_or_none(_column(raw, 14)),
         direction="incoming" if amount >= 0 else "outgoing",
-        counterparty_account=_string_or_none(_column(raw, 2)),
-        counterparty_bank_code=_string_or_none(_column(raw, 3)),
-        counterparty_bank_name=_string_or_none(_column(raw, 12)),
+        counterparty_bank_account=_bank_account(counterparty_account, counterparty_bank_code),
         counterparty_name=_string_or_none(_column(raw, 10)) or _string_or_none(_column(raw, 9)),
         constant_symbol=_string_or_none(_column(raw, 4)),
         variable_symbol=_string_or_none(_column(raw, 5)),
@@ -71,12 +71,9 @@ def normalize_transaction(raw: dict[str, Any], *, include_raw: bool = False) -> 
         user_identification=_string_or_none(_column(raw, 7)),
         message=_string_or_none(_column(raw, 16)) or _string_or_none(_column(raw, 25)),
         transaction_type=_string_or_none(_column(raw, 8)),
-        performer=_string_or_none(_column(raw, 9)),
         specification=_string_or_none(_column(raw, 18)),
         comment=_string_or_none(_column(raw, 25)),
-        bic=_string_or_none(_column(raw, 26)),
         order_id=_string_or_none(_column(raw, 17)),
-        payer_reference=_string_or_none(_column(raw, 27)),
         raw=raw if include_raw else None,
     )
 
@@ -122,3 +119,9 @@ def _date_string_or_none(value: Any) -> str | None:
         return date.fromisoformat(candidate).isoformat()
     except ValueError:
         return candidate
+
+
+def _bank_account(account: str | None, bank_code: str | None) -> str | None:
+    if not account or not bank_code:
+        return None
+    return f"{account}/{bank_code}"

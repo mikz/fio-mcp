@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
 import pytest
 import respx
@@ -173,18 +174,16 @@ def test_detail_level_shapes_transaction_privacy() -> None:
     assert summary.amount == transaction.amount
     assert summary.variable_symbol == transaction.variable_symbol
     assert summary.order_id == "39825209552"
-    assert summary.counterparty_account is None
+    assert summary.counterparty_bank_account == "123456789/2010"
     assert summary.counterparty_name is None
     assert summary.user_identification is None
     assert summary.message is None
     assert summary.comment is None
-    assert summary.payer_reference is None
     assert summary.raw is None
 
     counterparty = _shape_transaction(transaction, "counterparty")
-    assert counterparty.counterparty_account == "123456789"
+    assert counterparty.counterparty_bank_account == "123456789/2010"
     assert counterparty.counterparty_name == "Jana Novakova"
-    assert counterparty.payer_reference == "Jana Novakova reference"
     assert counterparty.message is None
     assert counterparty.comment is None
     assert counterparty.raw is None
@@ -206,10 +205,9 @@ async def test_list_accounts_exposes_safe_token_keys(monkeypatch: pytest.MonkeyP
     await client.aclose()
 
     assert result.accounts[0].account == "main"
-    assert result.accounts[0].account_key == "2603445200-2010-CZK"
+    assert result.accounts[0].bank_account == "2603445200/2010"
     assert result.accounts[0].token_count == 1
     assert result.accounts[0].tokens[0].token_key == "aaaabbbbccccdddd"
-    assert result.accounts[0].tokens[0].role == "marker"
     assert "token-for-test" not in result.model_dump_json()
 
 
@@ -230,7 +228,8 @@ async def test_startup_tokens_are_validated_into_runtime_accounts(
     listed = _list_accounts(client, include_tokens=True, include_status=False)
     await client.aclose()
 
-    assert listed.accounts[0].account_key == "2603445200-2010-CZK"
+    assert listed.accounts[0].account == "2603445200/2010"
+    assert listed.accounts[0].bank_account == "2603445200/2010"
     assert listed.accounts[0].token_count == 1
 
 
@@ -256,14 +255,14 @@ async def test_alias_account_and_remove_token_update_runtime(
     )
     client = FioClient(Settings(_env_file=None))
 
-    alias = client.alias_account("2603445200-2010-CZK", "main")
+    alias = client.alias_account("2603445200/2010", "main")
     removed = client.remove_token("main", "aaaabbbbccccdddd")
     listed = _list_accounts(client, include_tokens=True, include_status=False)
     await client.aclose()
 
     assert alias.account == "main"
+    assert alias.bank_account == "2603445200/2010"
     assert removed.token_count == 1
-    assert listed.accounts[0].marker_token_key == "1111222233334444"
     assert listed.accounts[0].tokens[0].token_key == "1111222233334444"
 
 
@@ -414,8 +413,7 @@ async def test_find_transactions_filters_exact_counterparty(
             date_from=date(2026, 3, 1),
             date_to=date(2026, 3, 31),
             direction="incoming",
-            counterparty_account="2198370339",
-            counterparty_bank_code="0800",
+            counterparty_bank_account="2198370339/0800",
             counterparty_name="Nadace VIA",
             detail_level="counterparty",
         ),
@@ -424,6 +422,8 @@ async def test_find_transactions_filters_exact_counterparty(
 
     assert result.error is None
     assert [transaction.transaction_id for transaction in result.transactions] == ["darujme"]
+    assert result.transactions[0].amount == Decimal("1926.00")
+    assert '"amount":"1926.00"' in result.transactions[0].model_dump_json()
 
 
 async def test_large_period_is_rejected_without_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -441,3 +441,7 @@ async def test_large_period_is_rejected_without_call(monkeypatch: pytest.MonkeyP
 
     assert result.error is not None
     assert result.error.code == "period_too_large"
+    assert result.error.suggested_date_chunks == [
+        {"date_from": "2026-01-01", "date_to": "2026-01-31"},
+        {"date_from": "2026-02-01", "date_to": "2026-02-15"},
+    ]

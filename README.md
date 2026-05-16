@@ -47,12 +47,13 @@ fio_remove_token(account, token_key)
 
 `fio_login` supports `mode: "auto" | "direct" | "prefab" | "web"`. Apps-capable
 clients get an inline Prefab form for the Fio API token and optional account
-alias; clients such as Codex can use direct arguments or a localhost web form.
+alias; other clients can use `mode: "direct"` with `token` and optional `alias`
+in the tool call, or a localhost web form.
 The submit path validates the token with a safe `periods` read for today,
 derives the real Fio account identity from the response, and adds the token to
 that account's token pool. If only one account is configured, transaction tools
 can omit `account`; otherwise pass either the account alias or canonical
-`account_key` from `fio_list_accounts`.
+`bank_account` from `fio_list_accounts`.
 
 Successful setup is stored in a credential store scoped to the server process
 `cwd`. The OS keyring service is `fio-mcp:<scope-id>`, account `accounts`, where

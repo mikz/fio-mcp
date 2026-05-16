@@ -90,6 +90,122 @@ async def test_cache_only_miss_never_calls_fio(monkeypatch: pytest.MonkeyPatch) 
 
 
 @respx.mock
+async def test_raw_period_cache_satisfies_non_raw_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = respx.get(
+        "https://fioapi.fio.cz/v1/rest/periods/token-for-test/2026-05-01/2026-05-16/transactions.json"
+    ).mock(return_value=Response(200, json=sample_fio_response()))
+    client = FioClient(settings(monkeypatch))
+
+    raw = await client.period(
+        "main",
+        date(2026, 5, 1),
+        date(2026, 5, 16),
+        cache_mode="use",
+        include_raw=True,
+    )
+    non_raw = await client.period(
+        "main",
+        date(2026, 5, 1),
+        date(2026, 5, 16),
+        cache_mode="use",
+        include_raw=False,
+    )
+    await client.aclose()
+
+    assert route.call_count == 1
+    assert raw.cache.hit is False
+    assert non_raw.cache.hit is True
+    assert non_raw.cache.key == "periods:2603445200-2010-CZK:2026-05-01:2026-05-16:raw=1"
+
+
+@respx.mock
+async def test_raw_period_request_does_not_use_non_raw_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(
+        "https://fioapi.fio.cz/v1/rest/periods/token-for-test/2026-05-01/2026-05-16/transactions.json"
+    ).mock(return_value=Response(200, json=sample_fio_response()))
+    client = FioClient(settings(monkeypatch))
+
+    await client.period(
+        "main",
+        date(2026, 5, 1),
+        date(2026, 5, 16),
+        cache_mode="use",
+        include_raw=False,
+    )
+    with pytest.raises(FioCacheMiss):
+        await client.period(
+            "main",
+            date(2026, 5, 1),
+            date(2026, 5, 16),
+            cache_mode="only",
+            include_raw=True,
+        )
+    await client.aclose()
+
+
+@respx.mock
+async def test_raw_last_cache_satisfies_non_raw_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = respx.get("https://fioapi.fio.cz/v1/rest/last/token-for-test/transactions.json").mock(
+        return_value=Response(200, json=sample_fio_response())
+    )
+    client = FioClient(settings(monkeypatch))
+
+    raw = await client.last("main", cache_mode="use", include_raw=True)
+    non_raw = await client.last("main", cache_mode="use", include_raw=False)
+    await client.aclose()
+
+    assert route.call_count == 1
+    assert raw.cache.hit is False
+    assert non_raw.cache.hit is True
+    assert non_raw.cache.key == "last:2603445200-2010-CZK:raw=1"
+
+
+@respx.mock
+async def test_period_returns_rate_limit_wait_required_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = sample_account()
+    monkeypatch.delenv("FIO_TOKENS_JSON", raising=False)
+    monkeypatch.setattr(
+        settings_module,
+        "load_stored_accounts",
+        lambda: settings_module.StoredFioAccounts(accounts=[account]),
+    )
+    monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "31")
+    client = FioClient(Settings(_env_file=None))
+    respx.get(
+        "https://fioapi.fio.cz/v1/rest/periods/token-for-test/2026-05-01/2026-05-16/transactions.json"
+    ).mock(return_value=Response(200, json=sample_fio_response()))
+
+    await client.period(
+        "main",
+        date(2026, 5, 1),
+        date(2026, 5, 16),
+        cache_mode="refresh",
+        include_raw=False,
+    )
+    with pytest.raises(FioApiError) as error:
+        await client.period(
+            "main",
+            date(2026, 5, 2),
+            date(2026, 5, 16),
+            cache_mode="refresh",
+            include_raw=False,
+            max_wait_seconds=0,
+        )
+    await client.aclose()
+
+    assert error.value.code == "rate_limit_wait_required"
+    assert error.value.retry_after_seconds == pytest.approx(31, abs=1)
+
+
+@respx.mock
 async def test_maps_fio_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     respx.get(
         "https://fioapi.fio.cz/v1/rest/periods/token-for-test/2026-05-01/2026-05-16/transactions.json"

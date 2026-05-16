@@ -46,7 +46,13 @@ class FioAccount(BaseModel):
 
     @property
     def handle(self) -> str:
-        return self.alias or self.account_key
+        return self.alias or self.bank_account or self.account_key
+
+    @property
+    def bank_account(self) -> str | None:
+        if self.bank_id is None:
+            return None
+        return f"{self.account_id}/{self.bank_id}"
 
     @field_validator("account_key", "account_id")
     @classmethod

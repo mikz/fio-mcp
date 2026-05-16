@@ -88,8 +88,7 @@ class FindTransactionsQuery(BaseModel):
                     "direction": "incoming",
                     "currency": "CZK",
                     "variable_symbol": "2026000001",
-                    "counterparty_account": "2198370339",
-                    "counterparty_bank_code": "0800",
+                    "counterparty_bank_account": "2198370339/0800",
                     "limit": 100,
                     "cursor": None,
                     "detail_level": "summary",
@@ -113,8 +112,7 @@ class FindTransactionsQuery(BaseModel):
     variable_symbol: str | None = None
     constant_symbol: str | None = None
     specific_symbol: str | None = None
-    counterparty_account: str | None = None
-    counterparty_bank_code: str | None = None
+    counterparty_bank_account: str | None = None
     counterparty_name: str | None = None
     counterparty_search: str | None = None
     message_search: str | None = None
@@ -131,6 +129,14 @@ class FindTransactionsQuery(BaseModel):
         ),
     )
     cache: CacheMode = "use"
+    max_wait_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum seconds this call may wait for a Fio token lease. If the local "
+            "rate-limit wait would be longer, the tool returns rate_limit_wait_required."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_dates(self) -> FindTransactionsQuery:
@@ -149,8 +155,7 @@ class FindTransactionsQuery(BaseModel):
                 "variable_symbol": self.variable_symbol,
                 "constant_symbol": self.constant_symbol,
                 "specific_symbol": self.specific_symbol,
-                "counterparty_account": self.counterparty_account,
-                "counterparty_bank_code": self.counterparty_bank_code,
+                "counterparty_bank_account": self.counterparty_bank_account,
                 "counterparty_name": self.counterparty_name,
                 "counterparty_search": self.counterparty_search,
                 "message_search": self.message_search,
@@ -186,6 +191,14 @@ class NewTransactionsRequest(BaseModel):
         ),
     )
     cache: CacheMode = "use"
+    max_wait_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum seconds this call may wait for a Fio token lease. If the local "
+            "rate-limit wait would be longer, the tool returns rate_limit_wait_required."
+        ),
+    )
 
     def effective_detail_level(self) -> DetailLevel:
         if self.detail_level is not None:
@@ -233,7 +246,7 @@ class ListAccountsResult(BaseModel):
 class AddTokenResult(BaseModel):
     ok: bool
     account: str
-    account_key: str
+    bank_account: str | None = None
     alias: str | None = None
     token_key: str
     token_count: int
@@ -243,14 +256,14 @@ class AddTokenResult(BaseModel):
 class AliasAccountResult(BaseModel):
     ok: bool
     account: str
-    account_key: str
+    bank_account: str | None = None
     alias: str
 
 
 class RemoveTokenResult(BaseModel):
     ok: bool
     account: str
-    account_key: str
+    bank_account: str | None = None
     token_count: int
     removed: bool
 
@@ -265,6 +278,7 @@ class MetadataLimits(BaseModel):
     max_page_limit: int
     max_period_days: int
     rate_limit_seconds: float
+    max_wait_seconds_option: str = "Pass max_wait_seconds on read tools to avoid blocking."
 
 
 class MetadataSideEffect(BaseModel):
@@ -293,22 +307,17 @@ class MetadataResult(BaseModel):
 COLUMN_METADATA = [
     MetadataEntry(code=0, name="posted_date", description="Datum"),
     MetadataEntry(code=1, name="amount", description="Objem"),
-    MetadataEntry(code=2, name="counterparty_account", description="Protiucet"),
-    MetadataEntry(code=3, name="counterparty_bank_code", description="Kod banky"),
+    MetadataEntry(code="2/3", name="counterparty_bank_account", description="Protiucet/Kod banky"),
     MetadataEntry(code=4, name="constant_symbol", description="KS"),
     MetadataEntry(code=5, name="variable_symbol", description="VS"),
     MetadataEntry(code=6, name="specific_symbol", description="SS"),
     MetadataEntry(code=8, name="transaction_type", description="Typ"),
-    MetadataEntry(code=9, name="performer", description="Provedl"),
     MetadataEntry(code=10, name="counterparty_name", description="Nazev protiuctu"),
-    MetadataEntry(code=12, name="counterparty_bank_name", description="Nazev banky"),
     MetadataEntry(code=14, name="currency", description="Mena"),
     MetadataEntry(code=16, name="message", description="Zprava pro prijemce"),
     MetadataEntry(code=18, name="specification", description="Upresneni"),
     MetadataEntry(code=22, name="transaction_id", description="ID pohybu"),
     MetadataEntry(code=25, name="comment", description="Komentar"),
-    MetadataEntry(code=26, name="bic", description="BIC"),
-    MetadataEntry(code=27, name="payer_reference", description="Reference platce"),
 ]
 ERROR_CODE_METADATA = [
     MetadataEntry(
@@ -351,7 +360,12 @@ ERROR_CODE_METADATA = [
     MetadataEntry(
         code="period_too_large",
         name="Requested date range is too wide",
-        description="Reduce the range or raise FIO_MAX_PERIOD_DAYS intentionally.",
+        description="Reduce the range or follow error.suggested_date_chunks.",
+    ),
+    MetadataEntry(
+        code="rate_limit_wait_required",
+        name="Local Fio rate-limit wait would exceed max_wait_seconds",
+        description="Retry after error.retry_after_seconds or use an existing cache entry.",
     ),
     MetadataEntry(
         code="invalid_cursor",
@@ -368,7 +382,7 @@ ERROR_CODE_METADATA = [
     MetadataEntry(
         code="unknown_account",
         name="Unknown configured account",
-        description="Call fio_list_accounts and retry with a listed alias or account_key.",
+        description="Call fio_list_accounts and retry with a listed alias or bank_account.",
     ),
     MetadataEntry(
         code="not_configured",
@@ -410,11 +424,14 @@ DETAIL_LEVEL_METADATA = [
     MetadataEntry(
         code="summary",
         name="Payment summary fields only",
-        description="No counterparty account, payer name, free text, or raw payload",
+        description=(
+            "Includes canonical counterparty bank account; hides names, free text, "
+            "and raw payload"
+        ),
     ),
     MetadataEntry(
         code="counterparty",
-        name="Summary plus structured counterparty fields",
+        name="Summary plus counterparty name",
         description="Free-text bank fields and raw payload remain hidden",
     ),
     MetadataEntry(
@@ -457,7 +474,7 @@ def _add_token_on_submit(setup: FioTokenSetup) -> str:
                 result = AddTokenResult(
                     ok=True,
                     account=alias_result.account,
-                    account_key=alias_result.account_key,
+                    bank_account=alias_result.bank_account,
                     alias=alias_result.alias,
                     token_key=result.token_key,
                     token_count=result.token_count,
@@ -519,7 +536,10 @@ async def fio_login(
             ctx,
             mode="direct",
             status="error",
-            message="mode=direct requires credentials.token; credentials.alias is optional.",
+            message=(
+                "mode=direct accepts credentials in the tool call and requires "
+                "credentials.token; credentials.alias is optional."
+            ),
             ok=False,
         )
     return _login_result_from_submit(ctx, "direct", _add_token_on_submit(credentials))
@@ -693,9 +713,24 @@ async def fio_test_connection(
     ctx: Context,
     account: str | None = None,
     cache: CacheMode = "use",
+    max_wait_seconds: Annotated[
+        float | None,
+        Field(
+            ge=0,
+            description=(
+                "Maximum seconds to wait for a Fio token lease before returning "
+                "rate_limit_wait_required."
+            ),
+        ),
+    ] = None,
 ) -> TestConnectionResult:
     """Verify that a configured Fio account token pool can read the API."""
-    return await _test_connection(_client_from_context(ctx), account=account, cache=cache)
+    return await _test_connection(
+        _client_from_context(ctx),
+        account=account,
+        cache=cache,
+        max_wait_seconds=max_wait_seconds,
+    )
 
 
 @mcp.tool
@@ -740,8 +775,27 @@ def _metadata_result(client: FioClient) -> MetadataResult:
     return MetadataResult(
         source_documents=["https://www.fio.cz/docs/cz/API_Bankovnictvi.pdf"],
         comparison_fields={
+            "money_format": "fixed_two_decimal_string",
+            "bank_account_format": "account/bank_code",
             "date_filters": ["date_from", "date_to"],
             "payment_fields": ["variable_symbol", "currency", "amount"],
+            "bank_account_fields": [
+                "account.bank_account",
+                "transactions.counterparty_bank_account",
+            ],
+            "local_filters": [
+                "variable_symbol",
+                "constant_symbol",
+                "specific_symbol",
+                "currency",
+                "direction",
+                "min_amount",
+                "max_amount",
+                "counterparty_bank_account",
+                "counterparty_name",
+                "counterparty_search",
+                "message_search",
+            ],
             "detail_level_for_pairing": "summary",
             "safe_endpoint": "periods",
             "marker_advancing_endpoint": "last",
@@ -749,7 +803,7 @@ def _metadata_result(client: FioClient) -> MetadataResult:
         setup_tools=["fio_login", "fio_alias_account", "fio_remove_token"],
         account_selection={
             "omitted_account_allowed_when": "exactly one account is configured",
-            "accepted_account_values": ["alias", "account_key"],
+            "accepted_account_values": ["alias", "bank_account"],
         },
         columns=COLUMN_METADATA,
         error_codes=ERROR_CODE_METADATA,
@@ -790,20 +844,14 @@ def _list_accounts(
     accounts = [
         AccountSummary(
             account=account.handle,
-            account_key=account.account_key,
             alias=account.alias,
-            account_id=account.account_id,
-            bank_id=account.bank_id,
+            bank_account=account.bank_account,
             currency=account.currency,
             iban=account.iban,
-            bic=account.bic,
             token_count=len(account.tokens),
-            marker_token_key=account.marker_token_key,
-            configured=True,
             tokens=[
                 TokenSummary(
                     token_key=token.token_key,
-                    role="marker" if token.token_key == account.marker_token_key else "read",
                     available=_token_available(client, token.token_key) if include_status else None,
                     next_available_at=client.token_rate_limit_status(
                         token.token_key
@@ -830,9 +878,14 @@ async def _test_connection(
     *,
     account: str | None,
     cache: CacheMode,
+    max_wait_seconds: float | None = None,
 ) -> TestConnectionResult:
     try:
-        result = await client.test_connection(account, cache_mode=cache)
+        result = await client.test_connection(
+            account,
+            cache_mode=cache,
+            max_wait_seconds=max_wait_seconds,
+        )
         return TestConnectionResult(
             ok=True,
             account=result.statement.account,
@@ -862,6 +915,11 @@ async def _find_transactions(
             error=ErrorInfo(
                 code="period_too_large",
                 message=f"Date range exceeds FIO_MAX_PERIOD_DAYS={client.max_period_days()}",
+                suggested_date_chunks=_suggest_date_chunks(
+                    query.date_from,
+                    query.date_to,
+                    client.max_period_days(),
+                ),
             ),
         )
 
@@ -894,6 +952,7 @@ async def _find_transactions(
             query.date_to,
             cache_mode=query.cache,
             include_raw=include_raw,
+            max_wait_seconds=query.max_wait_seconds,
         )
     except FioCacheMiss as exc:
         return FindTransactionsResult(
@@ -912,7 +971,8 @@ async def _find_transactions(
         transactions=transactions,
         cache=result.cache,
         rate_limit=result.rate_limit,
-        cache_key=period_cache_key(
+        cache_key=result.cache.key
+        or period_cache_key(
             resolved_account.account_key,
             query.date_from,
             query.date_to,
@@ -974,6 +1034,7 @@ async def _get_new_transactions(
             resolved_account.account_key,
             cache_mode=request.cache,
             include_raw=include_raw,
+            max_wait_seconds=request.max_wait_seconds,
         )
     except FioCacheMiss as exc:
         return FindTransactionsResult(
@@ -991,7 +1052,8 @@ async def _get_new_transactions(
         transactions=result.statement.transactions,
         cache=result.cache,
         rate_limit=result.rate_limit,
-        cache_key=last_cache_key(
+        cache_key=result.cache.key
+        or last_cache_key(
             resolved_account.account_key,
             include_raw=request.effective_include_raw(),
         ),
@@ -1081,17 +1143,11 @@ def _filter_transactions(
             for transaction in result
             if transaction.specific_symbol == query.specific_symbol
         ]
-    if query.counterparty_account:
+    if query.counterparty_bank_account:
         result = [
             transaction
             for transaction in result
-            if transaction.counterparty_account == query.counterparty_account
-        ]
-    if query.counterparty_bank_code:
-        result = [
-            transaction
-            for transaction in result
-            if transaction.counterparty_bank_code == query.counterparty_bank_code
+            if transaction.counterparty_bank_account == query.counterparty_bank_account
         ]
     if query.counterparty_name:
         result = [
@@ -1116,8 +1172,7 @@ def _filter_transactions(
             in " ".join(
                 [
                     transaction.counterparty_name or "",
-                    transaction.counterparty_account or "",
-                    transaction.counterparty_bank_code or "",
+                    transaction.counterparty_bank_account or "",
                 ]
             ).casefold()
         ]
@@ -1174,6 +1229,7 @@ SUMMARY_FIELDS = {
     "amount",
     "currency",
     "direction",
+    "counterparty_bank_account",
     "constant_symbol",
     "variable_symbol",
     "specific_symbol",
@@ -1181,12 +1237,7 @@ SUMMARY_FIELDS = {
     "order_id",
 }
 COUNTERPARTY_FIELDS = SUMMARY_FIELDS | {
-    "counterparty_account",
-    "counterparty_bank_code",
-    "counterparty_bank_name",
     "counterparty_name",
-    "bic",
-    "payer_reference",
 }
 
 
@@ -1209,10 +1260,12 @@ def _control_totals(transactions: list[Transaction]) -> ControlTotals:
     by_currency: dict[str, dict[str, str | int]] = {}
     for transaction in transactions:
         currency = transaction.currency or "unknown"
-        bucket = by_currency.setdefault(currency, {"count": 0, "incoming": "0", "outgoing": "0"})
+        bucket = by_currency.setdefault(
+            currency, {"count": 0, "incoming": "0.00", "outgoing": "0.00"}
+        )
         bucket["count"] = int(bucket["count"]) + 1
         key = "incoming" if transaction.direction == "incoming" else "outgoing"
-        bucket[key] = str(Decimal(str(bucket[key])) + abs(transaction.amount))
+        bucket[key] = _format_money(Decimal(str(bucket[key])) + abs(transaction.amount))
     return ControlTotals(
         count=len(transactions),
         incoming_count=sum(
@@ -1223,6 +1276,20 @@ def _control_totals(transactions: list[Transaction]) -> ControlTotals:
         ),
         by_currency=by_currency,
     )
+
+
+def _format_money(amount: Decimal) -> str:
+    return str(amount.quantize(Decimal("0.01")))
+
+
+def _suggest_date_chunks(date_from: date, date_to: date, max_days: int) -> list[dict[str, str]]:
+    chunks: list[dict[str, str]] = []
+    current = date_from
+    while current <= date_to:
+        chunk_to = min(date_to, current.fromordinal(current.toordinal() + max_days - 1))
+        chunks.append({"date_from": current.isoformat(), "date_to": chunk_to.isoformat()})
+        current = current.fromordinal(chunk_to.toordinal() + 1)
+    return chunks
 
 
 def _encode_cursor(cursor: SearchCursor) -> str:
@@ -1247,7 +1314,12 @@ def _filter_hash(payload: dict[str, Any]) -> str:
 
 def _error_info(exc: Exception) -> ErrorInfo:
     if isinstance(exc, FioApiError):
-        return ErrorInfo(code=exc.code, message=str(exc))
+        return ErrorInfo(
+            code=exc.code,
+            message=str(exc),
+            retry_after_seconds=exc.retry_after_seconds,
+            next_available_at=exc.next_available_at,
+        )
     if isinstance(exc, httpx.RequestError):
         return ErrorInfo(code="network_error", message="Fio API network request failed")
     return ErrorInfo(code="error", message=str(exc))

@@ -15,15 +15,16 @@ def test_normalizes_fio_columns() -> None:
     transaction = statement.transactions[0]
     assert statement.account.alias == "main"
     assert statement.account.account == "main"
-    assert statement.account.account_key == "2603445200-2010-CZK"
-    assert statement.account.account_id == "2603445200"
+    assert statement.account.bank_account == "2603445200/2010"
     assert transaction.transaction_id == "27573053171"
     assert transaction.posted_date == "2026-05-02"
     assert transaction.amount == Decimal("490.00")
     assert transaction.direction == "incoming"
     assert transaction.variable_symbol == "2026000001"
+    assert transaction.counterparty_bank_account == "123456789/2010"
     assert transaction.counterparty_name == "Jana Novakova"
     assert transaction.message == "Clenstvi"
+    assert '"amount":"490.00"' in transaction.model_dump_json()
 
 
 def test_normalizes_outgoing_transaction() -> None:

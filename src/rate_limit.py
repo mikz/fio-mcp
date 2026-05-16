@@ -17,6 +17,20 @@ class TokenLease:
     rate_limit: RateLimitInfo
 
 
+class RateLimitWaitRequired(RuntimeError):
+    def __init__(
+        self,
+        *,
+        token_key: str,
+        wait_seconds: float,
+        next_available_at: datetime,
+    ) -> None:
+        super().__init__("A Fio token is rate-limited beyond the allowed wait time")
+        self.token_key = token_key
+        self.wait_seconds = wait_seconds
+        self.next_available_at = next_available_at
+
+
 class TokenRateLimiter:
     def __init__(
         self,
@@ -32,7 +46,9 @@ class TokenRateLimiter:
         self._now = now or (lambda: datetime.now(UTC))
         self._sleep = sleep or asyncio.sleep
 
-    async def acquire(self, token_key: str) -> RateLimitInfo:
+    async def acquire(
+        self, token_key: str, *, max_wait_seconds: float | None = None
+    ) -> RateLimitInfo:
         lock = self._locks.setdefault(token_key, asyncio.Lock())
         waited = 0.0
         async with lock:
@@ -40,6 +56,12 @@ class TokenRateLimiter:
             next_available = self._next_available.get(token_key, now)
             if next_available > now:
                 waited = (next_available - now).total_seconds()
+                if max_wait_seconds is not None and waited > max_wait_seconds:
+                    raise RateLimitWaitRequired(
+                        token_key=token_key,
+                        wait_seconds=waited,
+                        next_available_at=next_available,
+                    )
                 await self._sleep(waited)
                 now = self._now()
 
@@ -63,7 +85,9 @@ class TokenRateLimiter:
             next_available_at=self._next_available.get(token_key),
         )
 
-    async def acquire_any(self, token_keys: list[str]) -> TokenLease:
+    async def acquire_any(
+        self, token_keys: list[str], *, max_wait_seconds: float | None = None
+    ) -> TokenLease:
         if not token_keys:
             raise ValueError("At least one token key is required")
         unique_keys = list(dict.fromkeys(token_keys))
@@ -77,6 +101,12 @@ class TokenRateLimiter:
             waited = 0.0
             if next_available > now:
                 waited = (next_available - now).total_seconds()
+                if max_wait_seconds is not None and waited > max_wait_seconds:
+                    raise RateLimitWaitRequired(
+                        token_key=selected,
+                        wait_seconds=waited,
+                        next_available_at=next_available,
+                    )
                 await self._sleep(waited)
                 now = self._now()
 
