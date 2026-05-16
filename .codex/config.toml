@@ -1,0 +1,15 @@
+[mcp_servers.fio]
+command = "mise"
+args = [
+  "run",
+  "mcp-reload",
+]
+cwd = "/Users/mikz/Developer/zivotsbedou.cz/fio-mcp"
+
+[mcp_servers.simpleshop]
+command = "mise"
+args = [
+  "run",
+  "simpleshop-mcp-reload",
+]
+cwd = "/Users/mikz/Developer/zivotsbedou.cz/fio-mcp"

@@ -1,0 +1,5 @@
+{
+  "name": "fio-mcp",
+  "displayName": "Fio MCP",
+  "description": "Read-only Fio Bank MCP server for transaction inspection"
+}

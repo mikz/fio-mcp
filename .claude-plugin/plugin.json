@@ -1,0 +1,27 @@
+{
+  "name": "fio-mcp",
+  "version": "0.1.0",
+  "description": "Read-only Fio Bank MCP server for transaction inspection",
+  "author": { "name": "Michal Cichra" },
+  "license": "MIT",
+  "keywords": ["fio", "bank", "transactions", "accounting", "mcp"],
+  "userConfig": {
+    "accounts_json": {
+      "type": "string",
+      "title": "Fio accounts JSON",
+      "description": "JSON array of account aliases and tokens",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "fio": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "${CLAUDE_PLUGIN_ROOT}", "fio-mcp"],
+      "env": {
+        "FIO_ACCOUNTS_JSON": "${user_config.accounts_json}"
+      }
+    }
+  }
+}
