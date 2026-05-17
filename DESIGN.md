@@ -15,11 +15,12 @@ Prefab, and localhost web modes; all modes call the same submit callback, which
 validates the token through a safe `periods` read, derives the returned Fio
 account identity, and stores the token behind that account.
 
-Runtime credentials are stored in a credential store scoped to the server
-process `cwd`. The OS keyring service is `fio-mcp:<scope-id>`, account
-`accounts`, and the private JSON fallback is
-`${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/scopes/<scope-id>/accounts.json`
-using mode `0600`. Legacy unscoped stores are intentionally not read.
+Runtime credentials are stored globally per user. The OS keyring service is
+`fio-mcp`, account `accounts`, and the private JSON fallback is
+`${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/accounts.json` using mode `0600`.
+Set `FIO_SCOPED_CREDENTIALS=1` to isolate credentials per server process `cwd`:
+the keyring service becomes `fio-mcp:<scope-id>` and the fallback file moves to
+`${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/scopes/<scope-id>/accounts.json`.
 The full account registry is not supported through environment variables. For
 headless startup, `FIO_TOKENS_JSON` may contain only a JSON array of raw token
 strings; the server validates those tokens and derives account pairing at

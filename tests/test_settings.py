@@ -126,6 +126,7 @@ def test_store_accounts_writes_keyring_and_private_file(
     tmp_path,
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("FIO_SCOPED_CREDENTIALS", "1")
     stored: dict[tuple[str, str], str] = {}
     monkeypatch.setitem(
         sys.modules,
@@ -176,6 +177,7 @@ def test_keyring_service_is_scoped_to_cwd(
     tmp_path: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FIO_SCOPED_CREDENTIALS", "1")
     stored: dict[tuple[str, str], str] = {}
     monkeypatch.setitem(
         sys.modules,
@@ -208,6 +210,7 @@ def test_accounts_file_is_scoped_to_cwd(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("FIO_SCOPED_CREDENTIALS", "1")
     monkeypatch.setattr(settings_module, "_load_from_keyring", lambda: None)
     monkeypatch.setitem(
         sys.modules,
@@ -250,3 +253,29 @@ def test_accounts_file_is_scoped_to_cwd(
     assert first_loaded == [first_account]
     assert second_loaded == [second_account]
     assert stat.S_IMODE(first_cfg.stat().st_mode) == 0o600
+
+
+def test_credentials_path_is_global_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("FIO_SCOPED_CREDENTIALS", raising=False)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    monkeypatch.chdir(first)
+    first_cfg = credentials_file_path()
+    monkeypatch.chdir(second)
+    second_cfg = credentials_file_path()
+
+    assert first_cfg == second_cfg
+    assert first_cfg.parent.name == "fio-mcp"
+    assert "scopes" not in first_cfg.parts
+
+
+def test_keyring_service_is_unscoped_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FIO_SCOPED_CREDENTIALS", raising=False)
+    assert keyring_service_name() == KEYRING_SERVICE

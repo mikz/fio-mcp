@@ -55,16 +55,20 @@ that account's token pool. If only one account is configured, transaction tools
 can omit `account`; otherwise pass either the account alias or canonical
 `bank_account` from `fio_list_accounts`.
 
-Successful setup is stored in a credential store scoped to the server process
-`cwd`. The OS keyring service is `fio-mcp:<scope-id>`, account `accounts`, where
-`scope-id` is derived from the canonical cwd. The private fallback file is:
+Successful setup is stored globally per user. The OS keyring service is
+`fio-mcp`, account `accounts`. The private fallback file is:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/scopes/<scope-id>/accounts.json
+${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/accounts.json
 ```
 
-The fallback file is written with mode `0600`. Legacy unscoped stores such as
-`${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/accounts.json` are not read.
+The fallback file is written with mode `0600`.
+
+To isolate credentials per server process `cwd` (useful when several distinct
+Fio token registries should not see each other), set `FIO_SCOPED_CREDENTIALS=1`.
+The keyring service then becomes `fio-mcp:<scope-id>` and the fallback file
+moves to `${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/scopes/<scope-id>/accounts.json`,
+where `scope-id` is the sha256 prefix of the canonical cwd.
 
 For headless pre-seeding, provide only a JSON array of raw tokens. The server
 validates them on startup through the same path as `fio_login` and then
