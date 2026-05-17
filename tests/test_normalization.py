@@ -51,3 +51,57 @@ def test_raw_payload_is_explicit() -> None:
 
     assert without_raw.transactions[0].raw is None
     assert with_raw.transactions[0].raw == raw
+
+
+def test_counterparty_name_does_not_fall_back_to_column_9() -> None:
+    """column 9 is the order initiator at our end, not the counterparty.
+    When column 10 is missing, counterparty_name must be None — never
+    confused with the column-9 'Provedl' field."""
+    raw = sample_transaction(counterparty_name="")
+    statement = normalize_statement(
+        sample_fio_response([raw]),
+        account=sample_account(token="token"),
+    )
+    assert statement.transactions[0].counterparty_name is None
+
+
+def test_payee_hint_prefers_counterparty_name() -> None:
+    raw = sample_transaction(counterparty_name="SM Production s.r.o.")
+    statement = normalize_statement(
+        sample_fio_response([raw]),
+        account=sample_account(token="token"),
+    )
+    assert statement.transactions[0].payee_hint == "SM Production s.r.o."
+
+
+def test_payee_hint_falls_back_to_z_reference_message() -> None:
+    raw = sample_transaction(
+        counterparty_name="",
+        message="Z920260035 SM PRODUCTION S.R.O.",
+    )
+    statement = normalize_statement(
+        sample_fio_response([raw]),
+        account=sample_account(token="token"),
+    )
+    assert statement.transactions[0].payee_hint == "SM PRODUCTION S.R.O."
+
+
+def test_payee_hint_falls_back_to_card_purchase_merchant() -> None:
+    raw = sample_transaction(
+        counterparty_name="",
+        message="Nákup: Ceska posta s.p., Praha, CZ, dne 15.05.2026, castka 99.00 CZK",
+    )
+    statement = normalize_statement(
+        sample_fio_response([raw]),
+        account=sample_account(token="token"),
+    )
+    assert statement.transactions[0].payee_hint == "Ceska posta s.p."
+
+
+def test_payee_hint_is_none_when_no_source_yields_a_name() -> None:
+    raw = sample_transaction(counterparty_name="", message="QRPLATBA")
+    statement = normalize_statement(
+        sample_fio_response([raw]),
+        account=sample_account(token="token"),
+    )
+    assert statement.transactions[0].payee_hint is None

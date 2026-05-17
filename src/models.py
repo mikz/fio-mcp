@@ -66,7 +66,27 @@ class Transaction(BaseModel):
     currency: str | None = None
     direction: Literal["incoming", "outgoing"]
     counterparty_bank_account: str | None = None
-    counterparty_name: str | None = None
+    counterparty_name: str | None = Field(
+        default=None,
+        description=(
+            "Other party's name as supplied by Fio (column 10 'Nazev protiuctu'). May be "
+            "empty for card purchases or transfers where Fio did not capture a name. NOT "
+            "the same as column 9 (initiator/'Provedl'), which identifies who entered the "
+            "payment order at your end. Prefer `payee_hint` when you need a single "
+            "best-effort counterparty label."
+        ),
+    )
+    payee_hint: str | None = Field(
+        default=None,
+        description=(
+            "Best-effort counterparty label derived from `counterparty_name` when present, "
+            "otherwise parsed from recognised `message` patterns (e.g. `Z<num> "
+            "SM PRODUCTION S.R.O.` or `Nákup: Ceska posta s.p., ...`). For outgoing "
+            "transactions this names the payee; for incoming, the payer. Null when no "
+            "source field carries an identifiable party. Populated at `detail_level=full` "
+            "and `raw` (hidden at `summary` and `counterparty` along with `message`)."
+        ),
+    )
     constant_symbol: str | None = None
     variable_symbol: str | None = None
     specific_symbol: str | None = None

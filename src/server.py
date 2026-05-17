@@ -26,6 +26,7 @@ from prefab_ui.rx import Rx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from client import FioApiError, FioCacheMiss, FioClient, last_cache_key, period_cache_key
+from normalization import MESSAGE_PATTERNS, MessagePattern
 from models import (
     AccountSummary,
     CacheInfo,
@@ -296,7 +297,25 @@ class MetadataResult(BaseModel):
     error_codes: list[MetadataEntry] = Field(default_factory=list)
     cache_modes: list[MetadataEntry] = Field(default_factory=list)
     detail_levels: list[MetadataEntry] = Field(default_factory=list)
+    detail_level_visibility: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Maps each `detail_level` to the Transaction fields populated at that level. "
+            "Use to decide which detail_level satisfies your downstream task without "
+            "fetching a sample. Field-membership is inclusive: lower levels are subsets "
+            "of higher ones."
+        ),
+    )
     directions: list[MetadataEntry] = Field(default_factory=list)
+    message_patterns: list[MessagePattern] = Field(
+        default_factory=list,
+        description=(
+            "Documented Fio `message` prefixes (QR Objednavka, PLATBA DARUJMECZ, Nákup card "
+            "purchases, Z-reference transfers, ...). Apply these patterns to a transaction's "
+            "`message` to classify the transaction or extract a counterparty name when "
+            "`counterparty_name` is empty. The same patterns power the derived `payee_hint`."
+        ),
+    )
     limits: MetadataLimits
     side_effects: list[MetadataSideEffect] = Field(default_factory=list)
     rate_limit_seconds: float
@@ -309,8 +328,41 @@ COLUMN_METADATA = [
     MetadataEntry(code=4, name="constant_symbol", description="KS"),
     MetadataEntry(code=5, name="variable_symbol", description="VS"),
     MetadataEntry(code=6, name="specific_symbol", description="SS"),
-    MetadataEntry(code=8, name="transaction_type", description="Typ"),
-    MetadataEntry(code=10, name="counterparty_name", description="Nazev protiuctu"),
+    MetadataEntry(
+        code=7,
+        name="user_identification",
+        description=(
+            "Uzivatelska identifikace. For card purchases this carries merchant info "
+            "(matches the `Nákup:` message_pattern)."
+        ),
+    ),
+    MetadataEntry(
+        code=8,
+        name="transaction_type",
+        description=(
+            "Typ operace (e.g. `Platba kartou`, `Bezhotovostni prijem`). Classifies the "
+            "transaction kind. NOT a payee identifier."
+        ),
+    ),
+    MetadataEntry(
+        code=9,
+        name="initiated_by_name",
+        description=(
+            "Provedl — name of the person who entered the payment order at your end (your "
+            "operator). NOT the counterparty. Do not use for payee matching; for that see "
+            "`counterparty_name` (column 10) or the derived `payee_hint`."
+        ),
+    ),
+    MetadataEntry(
+        code=10,
+        name="counterparty_name",
+        description=(
+            "Nazev protiuctu — counterparty name (payee for outgoing, payer for incoming). "
+            "May be empty, especially for card purchases. When empty, recover the party "
+            "from `message` (column 16) via the documented `message_patterns`, or rely on "
+            "the derived `payee_hint` which already does this."
+        ),
+    ),
     MetadataEntry(code=14, name="currency", description="Mena"),
     MetadataEntry(code=16, name="message", description="Zprava pro prijemce"),
     MetadataEntry(code=18, name="specification", description="Upresneni"),
@@ -418,19 +470,28 @@ DETAIL_LEVEL_METADATA = [
         code="summary",
         name="Payment summary fields only",
         description=(
-            "Includes canonical counterparty bank account; hides names, free text, "
-            "and raw payload"
+            "Identifiers, amount, dates, symbols, and canonical counterparty bank "
+            "account. Hides counterparty_name, message, comment, user_identification, "
+            "specification, and the derived payee_hint. Use for narrow reconciliation."
         ),
     ),
     MetadataEntry(
         code="counterparty",
         name="Summary plus counterparty name",
-        description="Free-text bank fields and raw payload remain hidden",
+        description=(
+            "Adds `counterparty_name`. Still hides message, comment, user_identification, "
+            "specification, and payee_hint. Insufficient for card transactions whose "
+            "payee lives in user_identification or message."
+        ),
     ),
     MetadataEntry(
         code="full",
         name="All normalized non-raw fields",
-        description="Includes bank free-text fields that may contain payer identity",
+        description=(
+            "Adds message, comment, user_identification, specification, and the derived "
+            "`payee_hint`. Required for accounting / payee identification of card payments "
+            "and message-only transfers. Excludes only the original Fio JSON payload."
+        ),
     ),
     MetadataEntry(
         code="raw",
@@ -760,7 +821,15 @@ async def fio_get_new_transactions(
 
 @mcp.tool
 async def fio_get_metadata(ctx: Context) -> MetadataResult:
-    """Return Fio transaction column, detail level, cache, error, and rate-limit metadata."""
+    """Return the Rosetta Stone for interpreting Fio responses.
+
+    Covers Fio column mappings, the `detail_level` field-visibility matrix
+    (`detail_level_visibility`), documented Fio `message` prefixes (`message_patterns`
+    — QR Objednavka, PLATBA DARUJMECZ, Nákup card purchases, Z-reference transfers),
+    cache modes, error codes, operational limits, side effects, and rate-limit info.
+
+    Call once at session start and cache the result. The payload is small.
+    """
     return _metadata_result(_client_from_context(ctx))
 
 
@@ -802,7 +871,9 @@ def _metadata_result(client: FioClient) -> MetadataResult:
         error_codes=ERROR_CODE_METADATA,
         cache_modes=CACHE_MODE_METADATA,
         detail_levels=DETAIL_LEVEL_METADATA,
+        detail_level_visibility=_detail_level_visibility(),
         directions=DIRECTION_METADATA,
+        message_patterns=MESSAGE_PATTERNS,
         limits=MetadataLimits(
             max_page_limit=MAX_PAGE_LIMIT,
             rate_limit_seconds=client.rate_limit_seconds(),
@@ -1216,6 +1287,24 @@ SUMMARY_FIELDS = {
 COUNTERPARTY_FIELDS = SUMMARY_FIELDS | {
     "counterparty_name",
 }
+FULL_FIELDS = COUNTERPARTY_FIELDS | {
+    "user_identification",
+    "message",
+    "specification",
+    "comment",
+    "payee_hint",
+}
+
+
+def _detail_level_visibility() -> dict[str, list[str]]:
+    """Field-visibility matrix exposed via fio_get_metadata so callers can pick
+    the right detail_level without sampling responses."""
+    return {
+        "summary": sorted(SUMMARY_FIELDS),
+        "counterparty": sorted(COUNTERPARTY_FIELDS),
+        "full": sorted(FULL_FIELDS),
+        "raw": sorted(FULL_FIELDS | {"raw"}),
+    }
 
 
 def _shape_transaction(transaction: Transaction, detail_level: DetailLevel) -> Transaction:

@@ -1,11 +1,97 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from models import AccountInfo, AccountStatement, Transaction
 from settings import FioAccount
+
+
+class MessagePattern(BaseModel):
+    """Documented Fio `message` prefix. Helps LLMs interpret what a free-text
+    bank message means without having to learn the conventions from scratch.
+
+    Only some patterns extract a usable counterparty name; the others just
+    classify the transaction (e.g. QR payment vs card purchase)."""
+
+    pattern: str = Field(description="Python regular expression matching the message prefix.")
+    description: str = Field(description="Human-readable explanation of what this prefix indicates.")
+    fields_extracted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of fields parseable from the matched groups. Empty when the pattern "
+            "only identifies the transaction kind without yielding usable data."
+        ),
+    )
+    example: str = Field(description="Concrete sample message string that matches this pattern.")
+
+
+MESSAGE_PATTERNS: list[MessagePattern] = [
+    MessagePattern(
+        pattern=r"^QR Objednavka ",
+        description="QR-code order payment request issued through Fio internet banking.",
+        example="QR Objednavka 20260050123",
+    ),
+    MessagePattern(
+        pattern=r"^QR Vyzva k platbe ",
+        description="QR-code incoming payment request.",
+        example="QR Vyzva k platbe 20260050456",
+    ),
+    MessagePattern(
+        pattern=r"^QRPLATBA",
+        description="Generic QR payment marker without an embedded order id.",
+        example="QRPLATBA",
+    ),
+    MessagePattern(
+        pattern=r"^PLATBA DARUJMECZ",
+        description="Donation routed through the Darujme.cz fundraising platform.",
+        example="PLATBA DARUJMECZ",
+    ),
+    MessagePattern(
+        pattern=r"^Z(\d+)\s+(.+)$",
+        description=(
+            "Bank transfer reference of the form `Z<number> <counterparty_name>`. "
+            "The counterparty name is the inbound or outbound party of the transfer."
+        ),
+        fields_extracted=["reference_number", "counterparty_name"],
+        example="Z920260035 SM PRODUCTION S.R.O.",
+    ),
+    MessagePattern(
+        pattern=r"^Nákup: ([^,]+), ([^,]+), CZ, dne (\d{2}\.\d{2}\.\d{4})",
+        description=(
+            "Card purchase recorded by Fio with merchant, location, and transaction date. "
+            "The merchant is the counterparty for an outgoing card payment."
+        ),
+        fields_extracted=["merchant_name", "location", "transaction_date"],
+        example="Nákup: Ceska posta s.p., Praha, CZ, dne 15.05.2026",
+    ),
+]
+
+
+_Z_REF_RE = re.compile(r"^Z\d+\s+(.+?)\s*$")
+_CARD_PURCHASE_RE = re.compile(r"^Nákup:\s+([^,]+)")
+
+
+def parse_payee_from_message(message: str | None) -> str | None:
+    """Extract a counterparty name from a Fio `message` field, if recognised.
+
+    Only the two patterns that carry a counterparty/merchant in their groups
+    are consulted (`Z<num> <name>` and `Nákup: <merchant>, ...`). Returns the
+    cleaned name, or None when no pattern matches.
+    """
+    if not message:
+        return None
+    match = _Z_REF_RE.match(message)
+    if match:
+        return match.group(1).strip().rstrip(",")
+    match = _CARD_PURCHASE_RE.match(message)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def normalize_statement(
@@ -57,6 +143,9 @@ def normalize_transaction(raw: dict[str, Any], *, include_raw: bool = False) -> 
     amount = _decimal_or_none(_column(raw, 1)) or Decimal("0")
     counterparty_account = _string_or_none(_column(raw, 2))
     counterparty_bank_code = _string_or_none(_column(raw, 3))
+    counterparty_name = _string_or_none(_column(raw, 10))
+    message = _string_or_none(_column(raw, 16)) or _string_or_none(_column(raw, 25))
+    payee_hint = counterparty_name or parse_payee_from_message(message)
     return Transaction(
         transaction_id=_string_or_none(_column(raw, 22)) or "",
         posted_date=_date_string_or_none(_column(raw, 0)),
@@ -64,12 +153,13 @@ def normalize_transaction(raw: dict[str, Any], *, include_raw: bool = False) -> 
         currency=_string_or_none(_column(raw, 14)),
         direction="incoming" if amount >= 0 else "outgoing",
         counterparty_bank_account=_bank_account(counterparty_account, counterparty_bank_code),
-        counterparty_name=_string_or_none(_column(raw, 10)) or _string_or_none(_column(raw, 9)),
+        counterparty_name=counterparty_name,
+        payee_hint=payee_hint,
         constant_symbol=_string_or_none(_column(raw, 4)),
         variable_symbol=_string_or_none(_column(raw, 5)),
         specific_symbol=_string_or_none(_column(raw, 6)),
         user_identification=_string_or_none(_column(raw, 7)),
-        message=_string_or_none(_column(raw, 16)) or _string_or_none(_column(raw, 25)),
+        message=message,
         transaction_type=_string_or_none(_column(raw, 8)),
         specification=_string_or_none(_column(raw, 18)),
         comment=_string_or_none(_column(raw, 25)),
