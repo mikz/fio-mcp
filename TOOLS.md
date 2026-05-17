@@ -1,263 +1,89 @@
 # Tool Reference
 
+Operational notes for maintainers running the fio-mcp server. All runtime
+information that an LLM client needs to use the tools — parameter
+descriptions, defaults, examples, detail-level visibility, message-pattern
+catalog, error codes, side effects — is exported through the MCP JSON
+Schema and the `fio_get_metadata` tool response. Call `fio_get_metadata`
+once at session start to get the authoritative reference; this file is for
+humans who maintain the server.
+
+## Read-only contract
+
 Bank-data tools are read-only. They never create, update, delete, or send
-payments. Setup tools only mutate local credential configuration.
+payments. Setup tools (`fio_login`, `fio_alias_account`, `fio_remove_token`)
+only mutate local credential configuration.
 
-## Cache Modes
+## Authentication and token storage
 
-Every Fio-reading tool has explicit cache control:
+`fio_login` accepts `mode` = `auto` / `direct` / `prefab` / `web`.
 
-```text
-use      return valid cache, otherwise call Fio
-refresh  bypass cache, call Fio, update cache
-only     return cache only; never call Fio
+- `auto` picks Prefab when the MCP client advertises Apps UI support, else
+  returns a localhost web-login URL.
+- `direct` requires `credentials.token` in the tool call (plus optional
+  `credentials.alias`). Use for headless clients.
+- `prefab` / `web` force one channel.
+
+Tokens are validated with a safe `periods` read for today before being
+stored. Storage:
+
+- Primary: system keyring under a fio-mcp service entry.
+- Fallback: a private file in the user config directory.
+
+Raw tokens are never returned by any tool or exposed in the JSON Schema.
+External tools see safe `token_key` references only.
+
+### Headless startup
+
+Set `FIO_TOKENS_JSON` to a JSON array of raw token strings to seed the
+registry at startup. Tokens are validated and paired to accounts at boot.
+Full account-registry JSON is intentionally not accepted through env to
+avoid leaking the internal layout.
+
+```bash
+export FIO_TOKENS_JSON='["raw-token-1","raw-token-2"]'
 ```
 
-`cache: "only"` returns `cache_miss` when no valid in-memory snapshot exists.
-Raw cached `periods` and `last` responses may satisfy later non-raw reads for
-the same account/date endpoint. Non-raw cache entries never satisfy raw reads.
-Pass `max_wait_seconds` on read tools when a call should return
-`rate_limit_wait_required` instead of waiting longer than allowed for the local
-token cooldown.
+## Settings
 
-## Detail Levels
+| Variable | Default | Purpose |
+|---|---|---|
+| `FIO_BASE_URL` | `https://fioapi.fio.cz/v1/rest/` | Override only for tests / sandboxes |
+| `FIO_TIMEOUT_SECONDS` | `30` | Per-request timeout |
+| `FIO_RATE_LIMIT_SECONDS` | `31` | Local per-token cooldown — keep ≥ 30 to match Fio's 30-second rule |
+| `FIO_CACHE_TTL_ACTIVE_SECONDS` | `600` | Cache TTL for live data |
+| `FIO_CACHE_TTL_HISTORICAL_SECONDS` | `86400` | Cache TTL for stable historical periods |
+| `FIO_CACHE_TTL_LAST_SECONDS` | `600` | Cache TTL for `last`-endpoint snapshots |
 
-Transaction tools support explicit response shaping through `detail_level`:
+## Cache architecture
 
-```text
-summary       payment summary fields only; hides names, free text, and raw payloads
-counterparty  summary fields plus structured counterparty name
-full          all normalized non-raw fields, including bank free text
-raw           full plus the raw Fio transaction payload
-```
+- In-memory only; no on-disk cache.
+- Cache keys include account, endpoint, date range, and detail-level
+  raw/non-raw flag.
+- Raw `periods` and `last` responses can satisfy later non-raw reads for
+  the same account/date endpoint. Non-raw cache entries never satisfy raw
+  reads.
 
-For pairing with SimpleShop or Darujme, prefer `detail_level: "summary"`.
-It returns `transaction_id`, dates, amount, currency, direction, payment symbols,
-canonical `counterparty_bank_account`, transaction type, and bank order ID.
-Amounts are returned as fixed two-decimal strings in JSON, for example
-`"1926.00"`. Bank accounts are returned as `account/bank_code`, for example
-`"2198370339/0800"`. Summary intentionally omits `message`, `comment`, and
-`user_identification` because banks can place customer names in those fields.
+## Side effects to remember
 
-`detail_level` is the only response-shaping input. Use `detail_level: "raw"` to
-include raw Fio payloads; the old compatibility flags are not accepted.
+- `fio_get_new_transactions` advances Fio's bank-side last-download marker.
+  Requires `confirm_advances_download_marker=true`. Marker is held by a
+  dedicated account token; other reads load-balance across the remaining
+  pool.
+- Setup tools mutate local credential storage but never call Fio.
 
-## `fio_login`
+## Troubleshooting
 
-Collects a Fio API token through one setup tool. `mode` accepts `auto`,
-`direct`, `prefab`, or `web`. `auto` uses Prefab when the MCP client advertises
-Apps UI support, otherwise it returns a localhost web-login URL. `direct` accepts
-`token` and optional `alias` in the `credentials` object passed in the tool call.
+| Symptom | Diagnosis |
+|---|---|
+| `409 / rate_limited` | Same token used within the 30s window — wait `retry_after_seconds` or use cache |
+| `invalid_token_or_url` | Token revoked or `FIO_BASE_URL` wrong |
+| `cursor_expired` | Cursor snapshot evicted from memory; repeat the original query |
+| `cursor_mismatch` | Filter set differs from the one that produced the cursor; restart pagination |
+| `confirmation_required` | Called `fio_get_new_transactions` without `confirm_advances_download_marker=true` |
+| `unknown_account` | Alias / bank_account not in the registry — call `fio_list_accounts` |
+| `not_configured` | No tokens stored — run `fio_login` |
+| `ambiguous_account` | More than one account configured; pass `account` explicitly |
 
-```json
-{
-  "mode": "direct",
-  "credentials": {
-    "token": "fio-token",
-    "alias": "main"
-  }
-}
-```
-
-The form asks for:
-
-- `token`: Fio API token from Fio internet banking
-- `alias`: optional friendly account alias, for example `main`
-
-The token is checked with a safe `periods` read for today. The response account
-metadata is used to pair the token to an account token pool. The raw token is
-stored in keyring plus a private fallback file and is never returned. The
-exposed MCP tool schema does not contain a raw `token` argument.
-
-Response:
-
-```json
-{
-  "ok": true,
-  "account": "2603445200/2010",
-  "bank_account": "2603445200/2010",
-  "alias": null,
-  "token_key": "a1b2c3d4e5f6a7b8",
-  "token_count": 1,
-  "added": true
-}
-```
-
-Adding the same token again is idempotent and reports that it is already
-configured.
-
-For headless startup, `FIO_TOKENS_JSON` may contain a JSON array of raw token
-strings. Full account-registry JSON is intentionally not accepted through env;
-startup tokens are validated and paired to accounts at runtime.
-
-## `fio_alias_account`
-
-Assigns a friendly alias to an account. `account` can be either the current
-alias or the canonical `bank_account` from `fio_list_accounts`.
-
-```json
-{
-  "account": "2603445200/2010",
-  "alias": "main"
-}
-```
-
-After aliasing, transaction tools can use `"account": "main"`.
-
-## `fio_remove_token`
-
-Removes a token by safe `token_key`; raw tokens are not needed for removal.
-
-```json
-{
-  "account": "main",
-  "token_key": "a1b2c3d4e5f6a7b8"
-}
-```
-
-The last token on an account cannot be removed. If the removed token was the
-marker token, the oldest remaining token becomes the marker token.
-
-## `fio_list_accounts`
-
-Lists configured accounts, optional token keys, and optional pool status. Raw
-tokens are never returned.
-
-```json
-{
-  "include_tokens": true,
-  "include_status": true
-}
-```
-
-Example account entry:
-
-```json
-{
-  "account": "main",
-  "alias": "main",
-  "bank_account": "2603445200/2010",
-  "currency": "CZK",
-  "token_count": 2,
-  "tokens": [
-    {
-      "token_key": "a1b2c3d4e5f6a7b8",
-      "available": true,
-      "next_available_at": null
-    }
-  ]
-}
-```
-
-## `fio_test_connection`
-
-Checks one account through a safe period read for today. If exactly one account
-is configured, `account` can be omitted.
-
-```json
-{
-  "account": "main",
-  "cache": "use"
-}
-```
-
-## `fio_find_transactions`
-
-Main transaction search tool. Uses the Fio `periods` endpoint and does not
-advance the bank-side last-download marker.
-
-```json
-{
-  "query": {
-    "account": "main",
-    "date_from": "2026-05-01",
-    "date_to": "2026-05-16",
-    "direction": "incoming",
-    "currency": "CZK",
-    "variable_symbol": "2026000001",
-    "counterparty_bank_account": "2198370339/0800",
-    "counterparty_search": "Novak",
-    "min_amount": "100.00",
-    "max_amount": "1000.00",
-    "limit": 100,
-    "cursor": null,
-    "detail_level": "summary",
-    "cache": "use"
-  }
-}
-```
-
-If exactly one account is configured, `account` can be omitted. If more than one
-account is configured, omitted account selection returns `ambiguous_account`.
-Safe period reads load-balance across the account's token pool.
-
-Fio's download endpoint only accepts account token, date range, and output
-format. Field filters such as variable symbol, amount, direction, currency,
-counterparty bank account, and message text are applied locally by this MCP
-after the bounded `periods` read.
-
-## `fio_get_new_transactions`
-
-Fetches from Fio's `last` endpoint. This endpoint advances Fio's bank-side
-download marker, so confirmation is required.
-
-```json
-{
-  "request": {
-    "account": "main",
-    "confirm_advances_download_marker": true,
-    "limit": 100,
-    "cursor": null,
-    "detail_level": "summary",
-    "cache": "use"
-  }
-}
-```
-
-Without `confirm_advances_download_marker: true`, the tool returns
-`confirmation_required`. This tool uses the account's marker token internally;
-it does not load-balance across read tokens.
-
-## `fio_get_metadata`
-
-Returns the machine-readable tool contract: column mappings, cache modes, detail
-levels, direction values, error codes, operational limits, side effects,
-rate-limit seconds, and the configured maximum period size.
-
-```json
-{}
-```
-
-The `limits` object includes:
-
-```text
-max_page_limit      maximum accepted limit for paged transaction responses
-rate_limit_seconds  local per-token cooldown
-max_wait_seconds    per-call option to avoid waiting longer than allowed
-```
-
-The `side_effects` list identifies guarded operations. Currently only
-`fio_get_new_transactions` has a bank-side side effect: it advances Fio's
-last-download marker and requires `confirm_advances_download_marker=true`.
-
-Known error codes:
-
-```text
-invalid_token_or_url   check the configured token and base URL
-rate_limited           Fio returned 409; retry after cooldown or use cache
-too_many_transactions  reduce date range or add narrower filters
-invalid_request        check dates, account config, and request parameters
-cache_miss             cache=only has no valid in-memory snapshot
-cursor_expired         repeat the original query to create a fresh cursor
-confirmation_required  last endpoint requires explicit marker confirmation
-rate_limit_wait_required retry after retry_after_seconds or use existing cache
-invalid_cursor         discard cursor and repeat the original query
-cursor_mismatch        repeat the exact filters used to create the cursor
-unknown_account        call fio_list_accounts and retry with alias or bank_account
-not_configured         call fio_login first
-ambiguous_account      pass account because multiple accounts are configured
-unknown_token          call fio_list_accounts with include_tokens=true
-last_token             add another token before removing this one
-network_error          Fio API network request failed
-error                  unexpected local fallback
-```
+The complete error-code catalog with remediation hints is in
+`fio_get_metadata.error_codes`.
