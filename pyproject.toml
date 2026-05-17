@@ -1,6 +1,6 @@
 [project]
 name = "fio-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "Read-only FastMCP server for Fio Bank transaction data"
 readme = "README.md"
 license = "MIT"
