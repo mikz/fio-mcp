@@ -105,31 +105,129 @@ class FindTransactionsQuery(BaseModel):
         },
     )
 
-    account: str | None = None
-    date_from: date
-    date_to: date
-    direction: Direction = "any"
-    currency: str | None = None
-    variable_symbol: str | None = None
-    constant_symbol: str | None = None
-    specific_symbol: str | None = None
-    counterparty_bank_account: str | None = None
-    counterparty_name: str | None = None
-    counterparty_search: str | None = None
-    message_search: str | None = None
-    min_amount: Decimal | None = None
-    max_amount: Decimal | None = None
-    limit: int = Field(default=100, ge=1, le=MAX_PAGE_LIMIT)
-    cursor: str | None = None
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Account selector — either the alias from fio_login/fio_alias_account or the "
+            "bank_account string (e.g. '2603445200/2010'). Required when more than one "
+            "account is configured; omit otherwise."
+        ),
+    )
+    date_from: date = Field(
+        description=(
+            "Inclusive start of the period (ISO YYYY-MM-DD). The Fio API returns up to "
+            "50000 transactions per response (HTTP 413 'too_many_transactions' if "
+            "exceeded); for typical small organisations this is unreachable for years of "
+            "history in one call."
+        ),
+    )
+    date_to: date = Field(
+        description="Inclusive end of the period (ISO YYYY-MM-DD). Must be on or after date_from.",
+    )
+    direction: Direction = Field(
+        default="any",
+        description=(
+            "Local direction filter: 'incoming', 'outgoing', or 'any' (default). Applied "
+            "after the Fio period read; does not reduce Fio API load."
+        ),
+    )
+    currency: str | None = Field(
+        default=None,
+        description="Exact-match currency filter (case-insensitive), e.g. 'CZK' or 'EUR'.",
+    )
+    variable_symbol: str | None = Field(
+        default=None,
+        description=(
+            "Exact-match filter on the Fio variable_symbol (VS) field. Use for "
+            "reconciling a bank payment to an invoice / order / Darujme payout VS."
+        ),
+    )
+    constant_symbol: str | None = Field(
+        default=None,
+        description="Exact-match filter on the Fio constant_symbol (KS).",
+    )
+    specific_symbol: str | None = Field(
+        default=None,
+        description="Exact-match filter on the Fio specific_symbol (SS).",
+    )
+    counterparty_bank_account: str | None = Field(
+        default=None,
+        description=(
+            "Exact-match filter on the counterparty bank account in 'account/bank_code' "
+            "form (e.g. '193181046/0300')."
+        ),
+    )
+    counterparty_name: str | None = Field(
+        default=None,
+        description=(
+            "Exact-match filter on counterparty_name. Note: counterparty_name is populated "
+            "only at detail_level='full' or 'raw' (post-fetch local filter), so a request "
+            "at detail_level='summary' or 'counterparty' may silently match nothing."
+        ),
+    )
+    counterparty_search: str | None = Field(
+        default=None,
+        description=(
+            "Case-insensitive substring search across counterparty_name and "
+            "counterparty_bank_account. NOT an exact match. Same detail_level caveat as "
+            "counterparty_name applies."
+        ),
+    )
+    message_search: str | None = Field(
+        default=None,
+        description=(
+            "Case-insensitive substring search across the `message` and `comment` fields. "
+            "NOT an exact match. Example: 'SM PRODUCTION' matches 'Z920260035 "
+            "SM PRODUCTION S.R.O.'. Note: message/comment populated only at "
+            "detail_level='full' or 'raw' — use one of those when filtering on text."
+        ),
+    )
+    min_amount: Decimal | None = Field(
+        default=None,
+        description=(
+            "Filter to transactions whose absolute amount is at least this value. Decimal "
+            "in the transaction currency."
+        ),
+    )
+    max_amount: Decimal | None = Field(
+        default=None,
+        description=(
+            "Filter to transactions whose absolute amount is at most this value. Decimal "
+            "in the transaction currency."
+        ),
+    )
+    limit: int = Field(
+        default=100,
+        ge=1,
+        le=MAX_PAGE_LIMIT,
+        description="Maximum transactions returned per page (1–500, default 100).",
+    )
+    cursor: str | None = Field(
+        default=None,
+        description=(
+            "Pagination cursor from a previous response's `next_cursor`. Pass back with "
+            "the same filter set — the server rejects the cursor if filters drift "
+            "between calls (audit safety)."
+        ),
+    )
     detail_level: DetailLevel | None = Field(
         default=None,
         description=(
-            "Controls transaction response fields. summary returns only reconciliation-safe "
-            "fields; counterparty adds structured counterparty fields; full returns normalized "
-            "non-raw fields; raw also exposes raw Fio payloads."
+            "Controls Transaction field visibility. Defaults to 'full'. For card payments "
+            "and bank transfers with payee info in the message use 'full' or 'raw' — "
+            "'summary' and 'counterparty' hide `user_identification`, `message`, `comment`, "
+            "`specification`, and the derived `payee_hint`. Call fio_get_metadata for "
+            "the complete `detail_level_visibility` matrix."
         ),
     )
-    cache: CacheMode = "use"
+    cache: CacheMode = Field(
+        default="use",
+        description=(
+            "'use' (default) returns cached data if fresh, else calls Fio. 'refresh' "
+            "ignores cache and always calls Fio. 'only' fails with cache_miss if no fresh "
+            "snapshot exists. See fio_get_metadata for TTLs."
+        ),
+    )
     max_wait_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -179,19 +277,51 @@ class FindTransactionsQuery(BaseModel):
 class NewTransactionsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str | None = None
-    confirm_advances_download_marker: bool = False
-    limit: int = Field(default=100, ge=1, le=MAX_PAGE_LIMIT)
-    cursor: str | None = None
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Account selector (alias or bank_account). Required when more than one "
+            "account is configured."
+        ),
+    )
+    confirm_advances_download_marker: bool = Field(
+        default=False,
+        description=(
+            "Required acknowledgement that this tool will advance Fio's bank-side "
+            "last-download marker — subsequent calls skip transactions returned here. "
+            "Pass `true` only when you genuinely want one-shot ingestion (e.g. a nightly "
+            "sync). For repeatable queries on a date range, use fio_find_transactions."
+        ),
+    )
+    limit: int = Field(
+        default=100,
+        ge=1,
+        le=MAX_PAGE_LIMIT,
+        description="Maximum transactions returned per page (1–500, default 100).",
+    )
+    cursor: str | None = Field(
+        default=None,
+        description=(
+            "Pagination cursor from a previous response's `next_cursor`. Pass back with "
+            "the same request to fetch the next page; cursor invalidates if the snapshot "
+            "expires (returns cursor_expired — repeat the original request)."
+        ),
+    )
     detail_level: DetailLevel | None = Field(
         default=None,
         description=(
-            "Controls transaction response fields. summary returns only reconciliation-safe "
-            "fields; counterparty adds structured counterparty fields; full returns normalized "
-            "non-raw fields; raw also exposes raw Fio payloads."
+            "Controls Transaction field visibility. Defaults to 'full'. See "
+            "fio_find_transactions for the full explanation and fio_get_metadata for the "
+            "`detail_level_visibility` matrix."
         ),
     )
-    cache: CacheMode = "use"
+    cache: CacheMode = Field(
+        default="use",
+        description=(
+            "'use' (default), 'refresh', or 'only'. See fio_find_transactions for "
+            "semantics."
+        ),
+    )
     max_wait_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -732,8 +862,33 @@ def _start_fio_web_login() -> str:
 
 
 @mcp.tool
-async def fio_alias_account(ctx: Context, account: str, alias: str) -> AliasAccountResult:
-    """Assign a friendly alias to a configured Fio account."""
+async def fio_alias_account(
+    ctx: Context,
+    account: Annotated[
+        str,
+        Field(
+            description=(
+                "Account identifier — the current alias or the bank_account string "
+                "(e.g. '2603445200/2010'). Use fio_list_accounts to see available accounts."
+            ),
+        ),
+    ],
+    alias: Annotated[
+        str,
+        Field(
+            description=(
+                "New friendly alias to assign (e.g. 'main', 'donation_account'). After this "
+                "tool succeeds, other fio_* tools accept `account=<alias>` in place of the "
+                "full bank_account string."
+            ),
+        ),
+    ],
+) -> AliasAccountResult:
+    """Assign or update the friendly alias for a configured Fio account.
+
+    Aliases simplify account selection across the other fio_* tools. Renaming
+    is idempotent and does not affect the underlying token or registry entry.
+    """
     try:
         result = _client_from_context(ctx).alias_account(account, alias)
         return AliasAccountResult(**result.__dict__)
@@ -742,8 +897,28 @@ async def fio_alias_account(ctx: Context, account: str, alias: str) -> AliasAcco
 
 
 @mcp.tool
-async def fio_remove_token(ctx: Context, account: str, token_key: str) -> RemoveTokenResult:
-    """Remove a configured token by its safe token_key from fio_list_accounts."""
+async def fio_remove_token(
+    ctx: Context,
+    account: Annotated[
+        str,
+        Field(description="Account identifier (alias or bank_account) that holds the token."),
+    ],
+    token_key: Annotated[
+        str,
+        Field(
+            description=(
+                "Safe token_key from fio_list_accounts (an opaque reference, NOT the raw "
+                "Fio API token). Each account can hold multiple tokens for rotation."
+            ),
+        ),
+    ],
+) -> RemoveTokenResult:
+    """Revoke a Fio API token by its safe token_key.
+
+    Destructive: the token_key cannot be reused after removal — to add another
+    token to the same account, call fio_login again. Removing the last token
+    blocks further queries on that account until a new one is added.
+    """
     try:
         result = _client_from_context(ctx).remove_token(account, token_key)
         return RemoveTokenResult(**result.__dict__)
@@ -754,10 +929,32 @@ async def fio_remove_token(ctx: Context, account: str, token_key: str) -> Remove
 @mcp.tool
 async def fio_list_accounts(
     ctx: Context,
-    include_tokens: bool = True,
-    include_status: bool = True,
+    include_tokens: Annotated[
+        bool,
+        Field(
+            description=(
+                "Include the per-account token list with safe token_keys and rate-limit "
+                "availability. Default true."
+            ),
+        ),
+    ] = True,
+    include_status: Annotated[
+        bool,
+        Field(
+            description=(
+                "Compute and include each token's rate-limit clock (available / "
+                "next_available_at). Cheap; default true."
+            ),
+        ),
+    ] = True,
 ) -> ListAccountsResult:
-    """List configured Fio accounts and safe token keys. Raw tokens are never returned."""
+    """List configured Fio accounts with bank_account, alias, currency, token count,
+    and per-token rate-limit availability.
+
+    Safe — never calls Fio's API and never returns raw token strings. Use to
+    discover which accounts exist before fio_find_transactions, or to check
+    whether a token is currently rate-limited.
+    """
     client = _client_from_context(ctx)
     return _list_accounts(client, include_tokens=include_tokens, include_status=include_status)
 
@@ -765,8 +962,24 @@ async def fio_list_accounts(
 @mcp.tool
 async def fio_test_connection(
     ctx: Context,
-    account: str | None = None,
-    cache: CacheMode = "use",
+    account: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Account identifier (alias or bank_account). Omit if exactly one account "
+                "is configured."
+            ),
+        ),
+    ] = None,
+    cache: Annotated[
+        CacheMode,
+        Field(
+            description=(
+                "'use' (default), 'refresh', or 'only'. See fio_find_transactions for "
+                "semantics; fio_get_metadata exposes cache TTLs."
+            ),
+        ),
+    ] = "use",
     max_wait_seconds: Annotated[
         float | None,
         Field(
@@ -778,7 +991,12 @@ async def fio_test_connection(
         ),
     ] = None,
 ) -> TestConnectionResult:
-    """Verify that a configured Fio account token pool can read the API."""
+    """Verify Fio API connectivity for a configured account without advancing the
+    bank-side download marker.
+
+    Returns an account header plus a minimal sample. Use to validate setup,
+    diagnose auth failures, or check rate-limit warmup before bulk queries.
+    """
     return await _test_connection(
         _client_from_context(ctx),
         account=account,
@@ -797,7 +1015,24 @@ async def fio_find_transactions(
     ],
     ctx: Context,
 ) -> FindTransactionsResult:
-    """Find Fio transactions for a date range without advancing Fio's last-download marker."""
+    """Search Fio transactions for a date range without advancing the bank-side
+    last-download marker. Use fio_get_new_transactions for marker-advancing
+    ingestion.
+
+    Filters: symbols, counterparty, message text, amount, currency, direction.
+
+    CRITICAL: detail_level controls which Transaction fields are populated. For
+    accounting / payee identification ALWAYS use 'full' (the default) — 'summary'
+    and 'counterparty' hide message, user_identification, comment, specification,
+    and the derived `payee_hint`. Without those, card merchants and message-only
+    transfer payees cannot be identified. Local filters like `message_search` /
+    `counterparty_search` rely on the same hidden fields and silently match
+    nothing at lower levels.
+
+    Example: date_from='2026-05-01', date_to='2026-05-31',
+    message_search='SM PRODUCTION', detail_level='full' returns May payments
+    that mention SM Production with the vendor name visible in `message`.
+    """
     return await _find_transactions(_client_from_context(ctx), query)
 
 
@@ -815,7 +1050,16 @@ async def fio_get_new_transactions(
     ],
     ctx: Context,
 ) -> FindTransactionsResult:
-    """Fetch new Fio transactions using the marker-advancing last endpoint."""
+    """⚠ SIDE EFFECT — advances Fio's bank-side last-download marker.
+
+    Use this only for one-shot ingestion of new transactions (e.g. a nightly
+    sync). For repeatable queries over a known date range, use
+    fio_find_transactions instead. Requires `confirm_advances_download_marker=true`
+    in the request — otherwise the tool returns `confirmation_required`.
+
+    detail_level semantics match fio_find_transactions; the same caveat about
+    hidden fields below detail_level='full' applies.
+    """
     return await _get_new_transactions(_client_from_context(ctx), request)
 
 
