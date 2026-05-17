@@ -153,9 +153,6 @@ class FioClient:
     def cache(self) -> ResponseCache:
         return self._cache
 
-    def max_period_days(self) -> int:
-        return self._settings.fio_max_period_days
-
     def rate_limit_seconds(self) -> float:
         return self._settings.fio_rate_limit_seconds
 

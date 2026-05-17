@@ -276,7 +276,6 @@ class MetadataEntry(BaseModel):
 
 class MetadataLimits(BaseModel):
     max_page_limit: int
-    max_period_days: int
     rate_limit_seconds: float
     max_wait_seconds_option: str = "Pass max_wait_seconds on read tools to avoid blocking."
 
@@ -301,7 +300,6 @@ class MetadataResult(BaseModel):
     limits: MetadataLimits
     side_effects: list[MetadataSideEffect] = Field(default_factory=list)
     rate_limit_seconds: float
-    max_period_days: int
 
 
 COLUMN_METADATA = [
@@ -356,11 +354,6 @@ ERROR_CODE_METADATA = [
         description=(
             "Pass confirm_advances_download_marker=true only when advancing the marker is intended."
         ),
-    ),
-    MetadataEntry(
-        code="period_too_large",
-        name="Requested date range is too wide",
-        description="Reduce the range or follow error.suggested_date_chunks.",
     ),
     MetadataEntry(
         code="rate_limit_wait_required",
@@ -812,12 +805,10 @@ def _metadata_result(client: FioClient) -> MetadataResult:
         directions=DIRECTION_METADATA,
         limits=MetadataLimits(
             max_page_limit=MAX_PAGE_LIMIT,
-            max_period_days=client.max_period_days(),
             rate_limit_seconds=client.rate_limit_seconds(),
         ),
         side_effects=SIDE_EFFECT_METADATA,
         rate_limit_seconds=client.rate_limit_seconds(),
-        max_period_days=client.max_period_days(),
     )
 
 
@@ -909,20 +900,6 @@ async def _test_connection(
 async def _find_transactions(
     client: FioClient, query: FindTransactionsQuery
 ) -> FindTransactionsResult:
-    if (query.date_to - query.date_from).days + 1 > client.max_period_days():
-        return FindTransactionsResult(
-            cache=CacheInfo(mode=query.cache, hit=False),
-            error=ErrorInfo(
-                code="period_too_large",
-                message=f"Date range exceeds FIO_MAX_PERIOD_DAYS={client.max_period_days()}",
-                suggested_date_chunks=_suggest_date_chunks(
-                    query.date_from,
-                    query.date_to,
-                    client.max_period_days(),
-                ),
-            ),
-        )
-
     try:
         resolved_account = client.account(query.account)
     except Exception as exc:
@@ -1280,16 +1257,6 @@ def _control_totals(transactions: list[Transaction]) -> ControlTotals:
 
 def _format_money(amount: Decimal) -> str:
     return str(amount.quantize(Decimal("0.01")))
-
-
-def _suggest_date_chunks(date_from: date, date_to: date, max_days: int) -> list[dict[str, str]]:
-    chunks: list[dict[str, str]] = []
-    current = date_from
-    while current <= date_to:
-        chunk_to = min(date_to, current.fromordinal(current.toordinal() + max_days - 1))
-        chunks.append({"date_from": current.isoformat(), "date_to": chunk_to.isoformat()})
-        current = current.fromordinal(chunk_to.toordinal() + 1)
-    return chunks
 
 
 def _encode_cursor(cursor: SearchCursor) -> str:

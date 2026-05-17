@@ -36,7 +36,6 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         lambda: settings_module.StoredFioAccounts(accounts=[account]),
     )
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
-    monkeypatch.setenv("FIO_MAX_PERIOD_DAYS", "31")
     return Settings(_env_file=None)
 
 
@@ -424,24 +423,3 @@ async def test_find_transactions_filters_exact_counterparty(
     assert [transaction.transaction_id for transaction in result.transactions] == ["darujme"]
     assert result.transactions[0].amount == Decimal("1926.00")
     assert '"amount":"1926.00"' in result.transactions[0].model_dump_json()
-
-
-async def test_large_period_is_rejected_without_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = FioClient(settings(monkeypatch))
-
-    result = await _find_transactions(
-        client,
-        FindTransactionsQuery(
-            account="main",
-            date_from=date(2026, 1, 1),
-            date_to=date(2026, 2, 15),
-        ),
-    )
-    await client.aclose()
-
-    assert result.error is not None
-    assert result.error.code == "period_too_large"
-    assert result.error.suggested_date_chunks == [
-        {"date_from": "2026-01-01", "date_to": "2026-01-31"},
-        {"date_from": "2026-02-01", "date_to": "2026-02-15"},
-    ]

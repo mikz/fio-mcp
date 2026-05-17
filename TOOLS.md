@@ -196,9 +196,6 @@ format. Field filters such as variable symbol, amount, direction, currency,
 counterparty bank account, and message text are applied locally by this MCP
 after the bounded `periods` read.
 
-Date ranges are capped by `FIO_MAX_PERIOD_DAYS` to avoid expensive failed calls
-under Fio's rate limit. Raise that setting when a wider period is intentional.
-
 ## `fio_get_new_transactions`
 
 Fetches from Fio's `last` endpoint. This endpoint advances Fio's bank-side
@@ -235,7 +232,6 @@ The `limits` object includes:
 
 ```text
 max_page_limit      maximum accepted limit for paged transaction responses
-max_period_days     maximum accepted Fio period range
 rate_limit_seconds  local per-token cooldown
 max_wait_seconds    per-call option to avoid waiting longer than allowed
 ```
@@ -254,7 +250,6 @@ invalid_request        check dates, account config, and request parameters
 cache_miss             cache=only has no valid in-memory snapshot
 cursor_expired         repeat the original query to create a fresh cursor
 confirmation_required  last endpoint requires explicit marker confirmation
-period_too_large       reduce range or follow suggested_date_chunks
 rate_limit_wait_required retry after retry_after_seconds or use existing cache
 invalid_cursor         discard cursor and repeat the original query
 cursor_mismatch        repeat the exact filters used to create the cursor

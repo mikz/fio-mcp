@@ -15,7 +15,6 @@ class ErrorInfo(BaseModel):
     message: str
     retry_after_seconds: float | None = None
     next_available_at: datetime | None = None
-    suggested_date_chunks: list[dict[str, str]] = Field(default_factory=list)
 
 
 class AccountSummary(BaseModel):

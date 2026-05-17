@@ -135,7 +135,6 @@ class Settings(BaseSettings):
         ge=0,
     )
     fio_cache_ttl_last_seconds: int = Field(default=600, alias="FIO_CACHE_TTL_LAST_SECONDS", ge=0)
-    fio_max_period_days: int = Field(default=31, alias="FIO_MAX_PERIOD_DAYS", ge=1)
 
     def accounts(self) -> list[FioAccount]:
         stored = load_stored_accounts()
