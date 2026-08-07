@@ -15,11 +15,7 @@ from tests.fixtures import sample_account, sample_fio_response
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     account = sample_account()
     monkeypatch.delenv("FIO_TOKENS_JSON", raising=False)
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[account]),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
     return Settings(_env_file=None)
 
@@ -172,11 +168,7 @@ async def test_period_returns_rate_limit_wait_required_without_waiting(
 ) -> None:
     account = sample_account()
     monkeypatch.delenv("FIO_TOKENS_JSON", raising=False)
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[account]),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "31")
     client = FioClient(Settings(_env_file=None))
     respx.get(
@@ -232,9 +224,6 @@ async def test_add_token_validates_persists_and_pairs_account(
 ) -> None:
     monkeypatch.delenv("FIO_TOKENS_JSON", raising=False)
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
-    monkeypatch.setattr(settings_module, "load_stored_accounts", lambda: None)
-    stored = []
-    monkeypatch.setattr("client.store_accounts", lambda accounts: stored.append(accounts))
     today = date.today()
     respx.get(
         f"https://fioapi.fio.cz/v1/rest/periods/new-token/{today}/{today}/transactions.json"
@@ -242,15 +231,10 @@ async def test_add_token_validates_persists_and_pairs_account(
     client = FioClient(Settings(_env_file=None))
 
     result = await client.add_token("new-token")
-    await client.aclose()
 
     assert result.added is True
     assert result.account_key == "2603445200-2010-CZK"
     assert result.token_count == 1
-    assert stored
-
-    client = FioClient(Settings(_env_file=None))
-    client.replace_accounts(stored[-1], persist=False)
     duplicate = await client.add_token("new-token")
     await client.aclose()
 
@@ -271,11 +255,7 @@ async def test_period_load_balances_across_account_tokens(monkeypatch: pytest.Mo
         ],
         marker_token_key="aaaabbbbccccdddd",
     )
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[account]),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "31")
     first = respx.get(
         "https://fioapi.fio.cz/v1/rest/periods/token-a/2026-05-01/2026-05-16/transactions.json"
@@ -318,11 +298,7 @@ async def test_last_uses_marker_token_only(monkeypatch: pytest.MonkeyPatch) -> N
         ],
         marker_token_key="1111222233334444",
     )
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[account]),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
     wrong = respx.get("https://fioapi.fio.cz/v1/rest/last/token-a/transactions.json").mock(
         return_value=Response(500, text="wrong token")

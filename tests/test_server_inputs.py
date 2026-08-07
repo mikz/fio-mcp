@@ -7,16 +7,12 @@ import pytest
 import respx
 from httpx import Response
 
-import client as client_module
-import server as server_module
 import settings as settings_module
 from client import FioClient
 from normalization import normalize_statement
 from server import (
     FindTransactionsQuery,
-    FioTokenSetup,
     NewTransactionsRequest,
-    _add_token_on_submit,
     _client_from_settings,
     _find_transactions,
     _get_new_transactions,
@@ -30,11 +26,7 @@ from tests.fixtures import sample_account, sample_fio_response, sample_transacti
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     account = sample_account()
     monkeypatch.delenv("FIO_TOKENS_JSON", raising=False)
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[account]),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
     return Settings(_env_file=None)
 
@@ -54,46 +46,18 @@ def test_query_rejects_unknown_keys() -> None:
 async def test_add_token_form_submit_validates_stores_alias_and_updates_live_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stored_accounts = []
+    account = sample_account()
     monkeypatch.delenv("FIO_TOKENS_JSON", raising=False)
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[]),
-    )
-    monkeypatch.setattr(
-        client_module, "store_accounts", lambda accounts: stored_accounts.append(accounts)
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
 
-    live_client = FioClient(Settings(_env_file=None))
-
-    def validate_token(token: str, token_key: str) -> dict[str, str | None]:
-        assert token == "secret-token"
-        assert token_key
-        return {
-            "account_id": "2603445200",
-            "bank_id": "2010",
-            "currency": "CZK",
-            "iban": "CZ6508000000192000145399",
-            "bic": "FIOBCZPPXXX",
-        }
-
-    monkeypatch.setattr(live_client, "_validate_token_sync", validate_token)
-    monkeypatch.setattr(server_module, "_LIVE_CLIENT", live_client)
+    live_client = await _client_from_settings(Settings(_env_file=None))
 
     try:
-        result = _add_token_on_submit(FioTokenSetup(token="secret-token", alias="main"))
+        assert live_client.accounts()[0].alias == account.alias
+        assert live_client.accounts()[0].handle == account.handle
     finally:
-        monkeypatch.setattr(server_module, "_LIVE_CLIENT", None)
         await live_client.aclose()
-
-    assert "Added Fio token" in result
-    assert "secret-token" not in result
-    account = live_client.accounts()[0]
-    assert account.alias == "main"
-    assert account.handle == "main"
-    assert stored_accounts
 
 
 def test_detail_level_defaults_and_raw_selection() -> None:
@@ -216,8 +180,6 @@ async def test_startup_tokens_are_validated_into_runtime_accounts(
 ) -> None:
     monkeypatch.setenv("FIO_TOKENS_JSON", '["new-token"]')
     monkeypatch.setenv("FIO_RATE_LIMIT_SECONDS", "0")
-    monkeypatch.setattr(settings_module, "load_stored_accounts", lambda: None)
-    monkeypatch.setattr("client.store_accounts", lambda accounts: None)
     today = date.today()
     respx.get(
         f"https://fioapi.fio.cz/v1/rest/periods/new-token/{today}/{today}/transactions.json"
@@ -235,7 +197,6 @@ async def test_startup_tokens_are_validated_into_runtime_accounts(
 async def test_alias_account_and_remove_token_update_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("client.store_accounts", lambda accounts: None)
     account = settings_module.FioAccount(
         account_key="2603445200-2010-CZK",
         account_id="2603445200",
@@ -247,11 +208,7 @@ async def test_alias_account_and_remove_token_update_runtime(
         ],
         marker_token_key="aaaabbbbccccdddd",
     )
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=[account]),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json([account]))
     client = FioClient(Settings(_env_file=None))
 
     alias = client.alias_account("2603445200/2010", "main")
@@ -284,11 +241,7 @@ async def test_omitted_account_is_ambiguous_with_multiple_accounts(
             marker_token_key="1111222233334444",
         ),
     ]
-    monkeypatch.setattr(
-        settings_module,
-        "load_stored_accounts",
-        lambda: settings_module.StoredFioAccounts(accounts=accounts),
-    )
+    monkeypatch.setenv("FIO_ACCOUNTS_JSON", settings_module._accounts_payload_json(accounts))
     client = FioClient(Settings(_env_file=None))
 
     result = await _find_transactions(

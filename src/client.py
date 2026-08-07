@@ -12,7 +12,7 @@ from cache import ResponseCache
 from models import AccountStatement, CacheInfo, CacheMode, RateLimitInfo, TokenPoolStatus
 from normalization import normalize_statement
 from rate_limit import RateLimitWaitRequired, TokenRateLimiter
-from settings import FioAccount, FioAccountToken, Settings, store_accounts
+from settings import FioAccount, FioAccountToken, Settings
 
 
 class FioApiError(RuntimeError):
@@ -85,6 +85,7 @@ class FioClient:
         *,
         cache: ResponseCache | None = None,
         limiter: TokenRateLimiter | None = None,
+        persist_accounts: bool = False,
     ) -> None:
         self._settings = settings
         self._cache = cache or ResponseCache()
@@ -98,6 +99,7 @@ class FioClient:
         )
         self._accounts_by_key: dict[str, FioAccount] = {}
         self._aliases: dict[str, str] = {}
+        self._persist_accounts = persist_accounts
         self.replace_accounts(settings.accounts(), persist=False)
 
     async def aclose(self) -> None:
@@ -122,7 +124,8 @@ class FioClient:
             accounts = self.accounts()
             if not accounts:
                 raise FioApiError(
-                    "No Fio accounts configured. Call fio_login first.",
+                    "No Fio accounts configured. Set FIO_ACCOUNTS_JSON, or use "
+                    "FIO_TOKENS_JSON for local bootstrap.",
                     code="not_configured",
                 )
             if len(accounts) > 1:
@@ -564,7 +567,7 @@ class FioClient:
         }
 
     def _persist(self) -> None:
-        store_accounts(self.accounts())
+        return
 
 
 def period_cache_key(account: str, date_from: date, date_to: date, *, include_raw: bool) -> str:

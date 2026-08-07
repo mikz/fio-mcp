@@ -10,35 +10,22 @@ humans who maintain the server.
 
 ## Read-only contract
 
-Bank-data tools are read-only. They never create, update, delete, or send
-payments. Setup tools (`fio_login`, `fio_alias_account`, `fio_remove_token`)
-only mutate local credential configuration.
+Bank-data tools are read-only. They never create, update, delete, send payments,
+or accept credentials through MCP tool calls.
 
 ## Authentication and token storage
 
-`fio_login` accepts `mode` = `auto` / `direct` / `prefab` / `web`.
-
-- `auto` picks Prefab when the MCP client advertises Apps UI support, else
-  returns a localhost web-login URL.
-- `direct` requires `credentials.token` in the tool call (plus optional
-  `credentials.alias`). Use for headless clients.
-- `prefab` / `web` force one channel.
-
-Tokens are validated with a safe `periods` read for today before being
-stored. Storage:
-
-- Primary: system keyring under a fio-mcp service entry.
-- Fallback: a private file in the user config directory.
+Configure accounts through environment or `.env`; no MCP tool accepts or stores
+Fio credentials. Use `FIO_ACCOUNTS_JSON` for the full account registry.
 
 Raw tokens are never returned by any tool or exposed in the JSON Schema.
 External tools see safe `token_key` references only.
 
-### Headless startup
+### Local token bootstrap
 
-Set `FIO_TOKENS_JSON` to a JSON array of raw token strings to seed the
-registry at startup. Tokens are validated and paired to accounts at boot.
-Full account-registry JSON is intentionally not accepted through env to
-avoid leaking the internal layout.
+For local development only, set `FIO_TOKENS_JSON` to a JSON array of raw token
+strings to seed the registry in memory at startup. Tokens are validated and
+paired to accounts at boot, but never persisted.
 
 ```bash
 export FIO_TOKENS_JSON='["raw-token-1","raw-token-2"]'
@@ -70,7 +57,7 @@ export FIO_TOKENS_JSON='["raw-token-1","raw-token-2"]'
   Requires `confirm_advances_download_marker=true`. Marker is held by a
   dedicated account token; other reads load-balance across the remaining
   pool.
-- Setup tools mutate local credential storage but never call Fio.
+- No MCP tool mutates local credential storage.
 
 ## Troubleshooting
 
@@ -82,7 +69,7 @@ export FIO_TOKENS_JSON='["raw-token-1","raw-token-2"]'
 | `cursor_mismatch` | Filter set differs from the one that produced the cursor; restart pagination |
 | `confirmation_required` | Called `fio_get_new_transactions` without `confirm_advances_download_marker=true` |
 | `unknown_account` | Alias / bank_account not in the registry — call `fio_list_accounts` |
-| `not_configured` | No tokens stored — run `fio_login` |
+| `not_configured` | Configure `FIO_ACCOUNTS_JSON` or local `FIO_TOKENS_JSON` |
 | `ambiguous_account` | More than one account configured; pass `account` explicitly |
 
 The complete error-code catalog with remediation hints is in

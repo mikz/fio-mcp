@@ -7,7 +7,7 @@ bank movements without mutating bank state. It uses Fio's read APIs only.
 
 ## Features
 
-- Runtime token setup with the unified `fio_login`; accounts can hold
+- Env-configured account registry through `FIO_ACCOUNTS_JSON`; accounts can hold
   multiple tokens.
 - No raw token reader parameters, responses, cache keys, or intentional logs.
 - Per-token pacing with a 31 second local lease for Fio's 30 second guidance.
@@ -23,9 +23,6 @@ bank movements without mutating bank state. It uses Fio's read APIs only.
 
 ```text
 fio_list_accounts
-fio_login
-fio_alias_account
-fio_remove_token
 fio_test_connection
 fio_find_transactions
 fio_get_new_transactions
@@ -37,48 +34,21 @@ for rationale.
 
 ## Runtime Setup
 
-The server starts without Fio credentials. Add tokens through the setup tools:
+The server starts without Fio credentials unless account data is provided in
+environment or `.env`. The stable configuration contract is the full account
+registry in `FIO_ACCOUNTS_JSON`:
 
 ```text
-fio_login(mode, credentials)
-fio_alias_account(account, alias)
-fio_remove_token(account, token_key)
+FIO_ACCOUNTS_JSON='{"accounts":[...]}'
 ```
 
-`fio_login` supports `mode: "auto" | "direct" | "prefab" | "web"`. Apps-capable
-clients get an inline Prefab form for the Fio API token and optional account
-alias; other clients can use `mode: "direct"` with `token` and optional `alias`
-in the tool call, or a localhost web form.
-The submit path validates the token with a safe `periods` read for today,
-derives the real Fio account identity from the response, and adds the token to
-that account's token pool. If only one account is configured, transaction tools
-can omit `account`; otherwise pass either the account alias or canonical
-`bank_account` from `fio_list_accounts`.
-
-Successful setup is stored globally per user. The OS keyring service is
-`fio-mcp`, account `accounts`. The private fallback file is:
-
-```text
-${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/accounts.json
-```
-
-The fallback file is written with mode `0600`.
-
-To isolate credentials per server process `cwd` (useful when several distinct
-Fio token registries should not see each other), set `FIO_SCOPED_CREDENTIALS=1`.
-The keyring service then becomes `fio-mcp:<scope-id>` and the fallback file
-moves to `${XDG_CONFIG_HOME:-$HOME/.config}/fio-mcp/scopes/<scope-id>/accounts.json`,
-where `scope-id` is the sha256 prefix of the canonical cwd.
-
-For headless pre-seeding, provide only a JSON array of raw tokens. The server
-validates them on startup through the same path as `fio_login` and then
-stores the derived account registry locally.
+For local development only, `FIO_TOKENS_JSON` may contain a JSON array of raw
+tokens. The server validates them at startup and derives accounts in memory; it
+does not persist credentials.
 
 ```bash
 FIO_TOKENS_JSON='["replace-with-fio-token","replace-with-another-token"]'
 ```
-
-Do not put the full internal account registry in environment variables.
 
 Optional:
 

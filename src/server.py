@@ -1,32 +1,23 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
-import secrets
-import threading
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Annotated, Any, Literal
-from urllib.parse import parse_qs
 
+import fastmcp
 import httpx
-from fastmcp import FastMCP
-from fastmcp.apps import UI_EXTENSION_ID
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 from fastmcp.server.lifespan import lifespan
-from prefab_ui.actions import Fetch, SetState, ShowToast
-from prefab_ui.actions.mcp import CallTool
-from prefab_ui.app import PrefabApp
-from prefab_ui.components import Button, Column, Form, Heading, Input, Muted, Text
-from prefab_ui.rx import Rx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from auth import HttpOAuthFastMCP
 from client import FioApiError, FioCacheMiss, FioClient, last_cache_key, period_cache_key
-from normalization import MESSAGE_PATTERNS, MessagePattern
 from models import (
     AccountSummary,
     CacheInfo,
@@ -41,29 +32,32 @@ from models import (
     TokenSummary,
     Transaction,
 )
+from normalization import MESSAGE_PATTERNS, MessagePattern
 from settings import Settings, load_settings
 
 DetailLevel = Literal["summary", "counterparty", "full", "raw"]
 MAX_PAGE_LIMIT = 500
 _LIVE_CLIENT: FioClient | None = None
+settings = load_settings()
 
 
 @lifespan
-async def app_lifespan(_server: FastMCP):
+async def app_lifespan(_server: HttpOAuthFastMCP):
     global _LIVE_CLIENT
-    client = await _client_from_settings(load_settings())
+    client = await _client_from_settings(settings)
     _LIVE_CLIENT = client
     try:
-        yield {"fio_client": client}
+        yield {"fio_client": client, "settings": settings}
     finally:
         _LIVE_CLIENT = None
         await client.aclose()
 
 
-mcp = FastMCP("Fio Bank", lifespan=app_lifespan)
-LoginMode = Literal["auto", "direct", "prefab", "web"]
-ResolvedLoginMode = Literal["direct", "prefab", "web"]
-_WEB_LOGIN_SERVERS: dict[str, ThreadingHTTPServer] = {}
+mcp = HttpOAuthFastMCP(
+    "Fio Bank",
+    settings=settings,
+    lifespan=app_lifespan,
+)
 
 
 async def _client_from_settings(settings: Settings) -> FioClient:
@@ -75,6 +69,16 @@ async def _client_from_settings(settings: Settings) -> FioClient:
         await client.aclose()
         raise
     return client
+
+
+@mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
+async def healthz(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "service": "fio-mcp"})
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "service": "fio-mcp"})
 
 
 class FindTransactionsQuery(BaseModel):
@@ -108,9 +112,9 @@ class FindTransactionsQuery(BaseModel):
     account: str | None = Field(
         default=None,
         description=(
-            "Account selector — either the alias from fio_login/fio_alias_account or the "
-            "bank_account string (e.g. '2603445200/2010'). Required when more than one "
-            "account is configured; omit otherwise."
+            "Account selector — either the configured alias or the bank_account string "
+            "(e.g. '2603445200/2010'). Required when more than one account is "
+            "configured; omit otherwise."
         ),
     )
     date_from: date = Field(
@@ -200,7 +204,7 @@ class FindTransactionsQuery(BaseModel):
         default=100,
         ge=1,
         le=MAX_PAGE_LIMIT,
-        description="Maximum transactions returned per page (1–500, default 100).",
+        description="Maximum transactions returned per page (1-500, default 100).",
     )
     cursor: str | None = Field(
         default=None,
@@ -297,7 +301,7 @@ class NewTransactionsRequest(BaseModel):
         default=100,
         ge=1,
         le=MAX_PAGE_LIMIT,
-        description="Maximum transactions returned per page (1–500, default 100).",
+        description="Maximum transactions returned per page (1-500, default 100).",
     )
     cursor: str | None = Field(
         default=None,
@@ -318,8 +322,7 @@ class NewTransactionsRequest(BaseModel):
     cache: CacheMode = Field(
         default="use",
         description=(
-            "'use' (default), 'refresh', or 'only'. See fio_find_transactions for "
-            "semantics."
+            "'use' (default), 'refresh', or 'only'. See fio_find_transactions for semantics."
         ),
     )
     max_wait_seconds: float | None = Field(
@@ -340,26 +343,6 @@ class NewTransactionsRequest(BaseModel):
         return self.detail_level == "raw"
 
 
-class FioTokenSetup(BaseModel):
-    """Fio API token setup. Stored locally and never returned by Fio MCP."""
-
-    token: str = Field(description="Fio API token from Fio internet banking")
-    alias: str | None = Field(
-        default=None,
-        description="Optional friendly account alias, for example main",
-    )
-
-
-class LoginResult(BaseModel):
-    ok: bool
-    mode: ResolvedLoginMode
-    status: Literal["logged_in", "needs_input", "unsupported", "error"]
-    message: str
-    url: str | None = None
-    transport: str | None = None
-    ui_supported: bool = False
-
-
 class SearchCursor(BaseModel):
     v: int = 1
     kind: Literal["period", "last"]
@@ -372,31 +355,6 @@ class SearchCursor(BaseModel):
 class ListAccountsResult(BaseModel):
     accounts: list[AccountSummary]
     rate_limit: dict[str, TokenPoolStatus] = Field(default_factory=dict)
-
-
-class AddTokenResult(BaseModel):
-    ok: bool
-    account: str
-    bank_account: str | None = None
-    alias: str | None = None
-    token_key: str
-    token_count: int
-    added: bool
-
-
-class AliasAccountResult(BaseModel):
-    ok: bool
-    account: str
-    bank_account: str | None = None
-    alias: str
-
-
-class RemoveTokenResult(BaseModel):
-    ok: bool
-    account: str
-    bank_account: str | None = None
-    token_count: int
-    removed: bool
 
 
 class MetadataEntry(BaseModel):
@@ -562,7 +520,7 @@ ERROR_CODE_METADATA = [
     MetadataEntry(
         code="not_configured",
         name="No Fio account tokens are configured",
-        description="Call fio_login first.",
+        description="Set FIO_ACCOUNTS_JSON, or use FIO_TOKENS_JSON for local bootstrap.",
     ),
     MetadataEntry(
         code="ambiguous_account",
@@ -644,286 +602,6 @@ SIDE_EFFECT_METADATA = [
         ),
     ),
 ]
-
-
-def _add_token_on_submit(setup: FioTokenSetup) -> str:
-    try:
-        client = _LIVE_CLIENT or FioClient(load_settings())
-        close_client = _LIVE_CLIENT is None
-        try:
-            result = client.add_token_sync(setup.token)
-            alias = setup.alias.strip() if setup.alias else None
-            if alias:
-                alias_result = client.alias_account(result.account_key, alias)
-                result = AddTokenResult(
-                    ok=True,
-                    account=alias_result.account,
-                    bank_account=alias_result.bank_account,
-                    alias=alias_result.alias,
-                    token_key=result.token_key,
-                    token_count=result.token_count,
-                    added=result.added,
-                )
-        finally:
-            if close_client:
-                asyncio.run(client.aclose())
-
-        action = "Added" if result.added else "Already configured"
-        alias_part = f" Alias: {result.alias}." if result.alias else ""
-        return (
-            f"{action} Fio token and paired it to account {result.account}. "
-            f"Token key: {result.token_key}. Token count: {result.token_count}."
-            f"{alias_part}"
-        )
-    except Exception as exc:
-        info = _error_info(exc)
-        return f"{info.code}: {info.message}"
-
-
-async def fio_login(
-    ctx: Context,
-    mode: LoginMode = "auto",
-    credentials: Annotated[
-        FioTokenSetup | None,
-        Field(
-            description=(
-                "Token setup for mode=direct. Omit for auto, prefab, or web. "
-                "Direct mode sends the token through the MCP tool call."
-            )
-        ),
-    ] = None,
-) -> LoginResult | PrefabApp:
-    """Add a Fio API token using auto, direct, Prefab UI, or localhost web login."""
-    selected = _resolve_login_mode(ctx, mode)
-    if selected == "prefab":
-        if not ctx.client_supports_extension(UI_EXTENSION_ID):
-            return _login_result(
-                ctx,
-                mode="prefab",
-                status="unsupported",
-                message="This MCP client does not advertise the Apps UI extension.",
-                ok=False,
-            )
-        return _fio_login_prefab_app()
-    if selected == "web":
-        url = _start_fio_web_login()
-        return _login_result(
-            ctx,
-            mode="web",
-            status="needs_input",
-            message=f"Open this local URL in a browser to add a Fio token: {url}",
-            ok=True,
-            url=url,
-        )
-    if credentials is None:
-        return _login_result(
-            ctx,
-            mode="direct",
-            status="error",
-            message=(
-                "mode=direct accepts credentials in the tool call and requires "
-                "credentials.token; credentials.alias is optional."
-            ),
-            ok=False,
-        )
-    return _login_result_from_submit(ctx, "direct", _add_token_on_submit(credentials))
-
-
-def _resolve_login_mode(ctx: Context, mode: LoginMode) -> ResolvedLoginMode:
-    if mode != "auto":
-        return mode
-    if ctx.client_supports_extension(UI_EXTENSION_ID):
-        return "prefab"
-    return "web"
-
-
-def _login_result(
-    ctx: Context,
-    *,
-    mode: ResolvedLoginMode,
-    status: Literal["logged_in", "needs_input", "unsupported", "error"],
-    message: str,
-    ok: bool,
-    url: str | None = None,
-) -> LoginResult:
-    return LoginResult(
-        ok=ok,
-        mode=mode,
-        status=status,
-        message=message,
-        url=url,
-        transport=ctx.transport,
-        ui_supported=ctx.client_supports_extension(UI_EXTENSION_ID),
-    )
-
-
-def _login_result_from_submit(ctx: Context, mode: ResolvedLoginMode, message: str) -> LoginResult:
-    ok = message.startswith(("Added Fio token", "Already configured Fio token"))
-    return _login_result(
-        ctx,
-        mode=mode,
-        status="logged_in" if ok else "error",
-        message=message,
-        ok=ok,
-    )
-
-
-def _fio_login_prefab_app(web_submit_url: str | None = None) -> PrefabApp:
-    credentials = {"token": Rx("token"), "alias": Rx("alias")}
-    if web_submit_url:
-        submit_action = Fetch(
-            web_submit_url,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-            body=credentials,
-            onSuccess=[
-                SetState("message", "{{ $result.message }}"),
-                ShowToast("{{ $result.message }}", variant="success"),
-            ],
-            onError=ShowToast("Fio token setup failed.", variant="error"),
-        )
-    else:
-        submit_action = CallTool(
-            "fio_login",
-            arguments={"mode": "direct", "credentials": credentials},
-            onSuccess=[
-                SetState("message", "{{ $result.message }}"),
-                ShowToast("{{ $result.message }}", variant="success"),
-            ],
-            onError=ShowToast("Fio token setup failed.", variant="error"),
-        )
-
-    with Column(gap=4, css_class="p-6 max-w-md") as view:
-        Heading("Add Fio API token", level=2)
-        Muted("The token is validated with Fio and stored locally for this MCP scope.")
-        with Form(onSubmit=submit_action):
-            Input(name="token", inputType="password", placeholder="Fio API token", required=True)
-            Input(name="alias", placeholder="Optional account alias")
-            Button("Add token", buttonType="submit")
-        Text(content=Rx("message"))
-    return PrefabApp(title="Fio Login", view=view, state={"message": ""})
-
-
-class _FioLoginHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        server = self.server
-        token = getattr(server, "login_token", "")
-        if self.path.rstrip("/") != f"/{token}":
-            self.send_error(404)
-            return
-        submit_url = f"http://127.0.0.1:{server.server_port}/{token}/submit"
-        html = _fio_login_prefab_app(submit_url).html()
-        body = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self) -> None:
-        server = self.server
-        token = getattr(server, "login_token", "")
-        if self.path != f"/{token}/submit":
-            self.send_error(404)
-            return
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8")
-        try:
-            if "application/json" in self.headers.get("Content-Type", ""):
-                payload = json.loads(raw or "{}")
-            else:
-                parsed = parse_qs(raw)
-                payload = {key: values[-1] for key, values in parsed.items()}
-            message = _add_token_on_submit(FioTokenSetup.model_validate(payload))
-            ok = message.startswith(("Added Fio token", "Already configured Fio token"))
-            self._send_json({"ok": ok, "message": message})
-        except Exception as exc:
-            self._send_json({"ok": False, "message": str(exc)}, status=400)
-
-    def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
-def _start_fio_web_login() -> str:
-    token = secrets.token_urlsafe(24)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _FioLoginHandler)
-    server.login_token = token  # type: ignore[attr-defined]
-    _WEB_LOGIN_SERVERS[token] = server
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{server.server_port}/{token}"
-
-
-@mcp.tool
-async def fio_alias_account(
-    ctx: Context,
-    account: Annotated[
-        str,
-        Field(
-            description=(
-                "Account identifier — the current alias or the bank_account string "
-                "(e.g. '2603445200/2010'). Use fio_list_accounts to see available accounts."
-            ),
-        ),
-    ],
-    alias: Annotated[
-        str,
-        Field(
-            description=(
-                "New friendly alias to assign (e.g. 'main', 'donation_account'). After this "
-                "tool succeeds, other fio_* tools accept `account=<alias>` in place of the "
-                "full bank_account string."
-            ),
-        ),
-    ],
-) -> AliasAccountResult:
-    """Assign or update the friendly alias for a configured Fio account.
-
-    Aliases simplify account selection across the other fio_* tools. Renaming
-    is idempotent and does not affect the underlying token or registry entry.
-    """
-    try:
-        result = _client_from_context(ctx).alias_account(account, alias)
-        return AliasAccountResult(**result.__dict__)
-    except Exception as exc:
-        raise _tool_error(exc) from exc
-
-
-@mcp.tool
-async def fio_remove_token(
-    ctx: Context,
-    account: Annotated[
-        str,
-        Field(description="Account identifier (alias or bank_account) that holds the token."),
-    ],
-    token_key: Annotated[
-        str,
-        Field(
-            description=(
-                "Safe token_key from fio_list_accounts (an opaque reference, NOT the raw "
-                "Fio API token). Each account can hold multiple tokens for rotation."
-            ),
-        ),
-    ],
-) -> RemoveTokenResult:
-    """Revoke a Fio API token by its safe token_key.
-
-    Destructive: the token_key cannot be reused after removal — to add another
-    token to the same account, call fio_login again. Removing the last token
-    blocks further queries on that account until a new one is added.
-    """
-    try:
-        result = _client_from_context(ctx).remove_token(account, token_key)
-        return RemoveTokenResult(**result.__dict__)
-    except Exception as exc:
-        raise _tool_error(exc) from exc
 
 
 @mcp.tool
@@ -1106,7 +784,7 @@ def _metadata_result(client: FioClient) -> MetadataResult:
             "safe_endpoint": "periods",
             "marker_advancing_endpoint": "last",
         },
-        setup_tools=["fio_login", "fio_alias_account", "fio_remove_token"],
+        setup_tools=[],
         account_selection={
             "omitted_account_allowed_when": "exactly one account is configured",
             "accepted_account_values": ["alias", "bank_account"],
@@ -1626,10 +1304,10 @@ def _error_info(exc: Exception) -> ErrorInfo:
 
 
 def main() -> None:
-    mcp.run()
-
-
-mcp.tool(fio_login, app=True)
+    if fastmcp.settings.transport == "stdio":
+        mcp.run()
+    else:
+        mcp.run(host=settings.host, port=settings.port)
 
 
 if __name__ == "__main__":

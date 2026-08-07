@@ -19,7 +19,9 @@ class MessagePattern(BaseModel):
     classify the transaction (e.g. QR payment vs card purchase)."""
 
     pattern: str = Field(description="Python regular expression matching the message prefix.")
-    description: str = Field(description="Human-readable explanation of what this prefix indicates.")
+    description: str = Field(
+        description="Human-readable explanation of what this prefix indicates."
+    )
     fields_extracted: list[str] = Field(
         default_factory=list,
         description=(

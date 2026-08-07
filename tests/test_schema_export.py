@@ -19,9 +19,6 @@ async def tool_schema() -> dict[str, dict[str, object]]:
 
 async def test_tool_set_is_stable(tool_schema: dict[str, dict[str, object]]) -> None:
     assert set(tool_schema) == {
-        "fio_login",
-        "fio_alias_account",
-        "fio_remove_token",
         "fio_list_accounts",
         "fio_test_connection",
         "fio_find_transactions",
@@ -70,7 +67,9 @@ async def test_find_transactions_query_fields_have_descriptions(
         "cache",
         "max_wait_seconds",
     ]
-    missing = [name for name in must_have_description if not properties.get(name, {}).get("description")]
+    missing = [
+        name for name in must_have_description if not properties.get(name, {}).get("description")
+    ]
     assert not missing, f"FindTransactionsQuery fields missing description: {missing}"
 
 
@@ -89,14 +88,16 @@ async def test_new_transactions_request_fields_have_descriptions(
         "cache",
         "max_wait_seconds",
     ]
-    missing = [name for name in must_have_description if not properties.get(name, {}).get("description")]
+    missing = [
+        name for name in must_have_description if not properties.get(name, {}).get("description")
+    ]
     assert not missing, f"NewTransactionsRequest fields missing description: {missing}"
 
 
 async def test_detail_level_description_warns_about_hidden_fields(
     tool_schema: dict[str, dict[str, object]],
 ) -> None:
-    """E1: detail_level description must warn that summary/counterparty hide message + user_identification."""
+    """E1: detail_level description must warn about hidden matching fields."""
     query = _properties(tool_schema["fio_find_transactions"], "query")
     detail = query["properties"]["detail_level"]  # type: ignore[index]
     description = detail.get("description", "") if isinstance(detail, dict) else ""
@@ -148,7 +149,10 @@ async def test_no_dead_references_to_removed_period_cap(
 ) -> None:
     """T2-0 regression guard: no schema mentions period_too_large or FIO_MAX_PERIOD_DAYS."""
     blob = repr(tool_schema)
-    for forbidden in ("period_too_large", "FIO_MAX_PERIOD_DAYS", "max_period_days", "suggested_date_chunks"):
-        assert forbidden not in blob, (
-            f"schema still references removed concept {forbidden!r}"
-        )
+    for forbidden in (
+        "period_too_large",
+        "FIO_MAX_PERIOD_DAYS",
+        "max_period_days",
+        "suggested_date_chunks",
+    ):
+        assert forbidden not in blob, f"schema still references removed concept {forbidden!r}"

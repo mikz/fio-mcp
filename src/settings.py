@@ -1,20 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-from contextlib import suppress
 from datetime import UTC, datetime
-from hashlib import sha256
-from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-KEYRING_SERVICE = "fio-mcp"
-KEYRING_ACCOUNTS_ACCOUNT = "accounts"
-CREDENTIAL_SCOPE_ID_LENGTH = 16
+PROJECT_ID = "zsb-gwscli"
 ALIAS_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}")
 TOKEN_KEY_RE = re.compile(r"[a-f0-9]{16}")
 
@@ -117,6 +111,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    fio_accounts_json: str | None = Field(default=None, alias="FIO_ACCOUNTS_JSON")
     fio_tokens_json: str | None = Field(default=None, alias="FIO_TOKENS_JSON")
     fio_base_url: AnyHttpUrl = Field(
         default="https://fioapi.fio.cz/v1/rest/",
@@ -135,10 +130,26 @@ class Settings(BaseSettings):
         ge=0,
     )
     fio_cache_ttl_last_seconds: int = Field(default=600, alias="FIO_CACHE_TTL_LAST_SECONDS", ge=0)
+    host: str = Field(default="0.0.0.0", alias="HOST")
+    port: int = Field(default=8080, alias="PORT")
+    project_id: str = Field(default=PROJECT_ID, alias="PROJECT_ID")
+    google_client_id: str | None = Field(default=None, alias="GOOGLE_OAUTH_CLIENT_ID")
+    google_client_secret: str | None = Field(default=None, alias="GOOGLE_OAUTH_CLIENT_SECRET")
+    base_url: str | None = Field(default=None, alias="BASE_URL")
+    jwt_signing_key: str | None = Field(default=None, alias="JWT_SIGNING_KEY")
+    storage_encryption_key: str | None = Field(default=None, alias="STORAGE_ENCRYPTION_KEY")
+    oauth_storage_backend: Literal["firestore", "filetree"] = Field(
+        default="firestore",
+        alias="OAUTH_STORAGE_BACKEND",
+    )
+    oauth_storage_dir: str = Field(default="/tmp/fio-mcp/oauth", alias="OAUTH_STORAGE_DIR")
+    firestore_database: str = Field(default="(default)", alias="FIRESTORE_DATABASE")
+    firestore_collection: str = Field(default="fio-mcp-oauth", alias="FIRESTORE_COLLECTION")
 
     def accounts(self) -> list[FioAccount]:
-        stored = load_stored_accounts()
-        return stored.accounts if stored is not None else []
+        if self.fio_accounts_json:
+            return _parse_accounts_json(self.fio_accounts_json).accounts
+        return []
 
     def startup_tokens(self) -> list[SecretStr]:
         if not self.fio_tokens_json:
@@ -155,82 +166,6 @@ class Settings(BaseSettings):
                 raise ValueError("FIO_TOKENS_JSON must contain only non-empty token strings")
             tokens.append(SecretStr(item.strip()))
         return tokens
-
-
-def credentials_scoped_to_cwd() -> bool:
-    raw = os.environ.get("FIO_SCOPED_CREDENTIALS", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
-
-
-def credentials_file_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    root = Path(base) / "fio-mcp"
-    if credentials_scoped_to_cwd():
-        return root / "scopes" / credential_scope_id() / "accounts.json"
-    return root / "accounts.json"
-
-
-def credential_scope_cwd() -> Path:
-    return Path.cwd().resolve()
-
-
-def credential_scope_id() -> str:
-    scope = str(credential_scope_cwd()).encode("utf-8")
-    return sha256(scope).hexdigest()[:CREDENTIAL_SCOPE_ID_LENGTH]
-
-
-def keyring_service_name() -> str:
-    if credentials_scoped_to_cwd():
-        return f"{KEYRING_SERVICE}:{credential_scope_id()}"
-    return KEYRING_SERVICE
-
-
-def _load_from_keyring() -> StoredFioAccounts | None:
-    try:
-        import keyring
-    except Exception:
-        return None
-    try:
-        payload = keyring.get_password(keyring_service_name(), KEYRING_ACCOUNTS_ACCOUNT)
-    except Exception:
-        return None
-    if not payload:
-        return None
-    try:
-        return _parse_accounts_json(payload)
-    except ValueError:
-        return None
-
-
-def _load_from_file() -> StoredFioAccounts | None:
-    cfg = credentials_file_path()
-    if not cfg.is_file():
-        return None
-    try:
-        payload = cfg.read_text(encoding="utf-8")
-        return _parse_accounts_json(payload)
-    except (OSError, ValueError):
-        return None
-
-
-def load_stored_accounts() -> StoredFioAccounts | None:
-    return _load_from_keyring() or _load_from_file()
-
-
-def store_accounts(accounts: list[FioAccount]) -> None:
-    payload = _accounts_payload_json(accounts)
-    try:
-        import keyring
-
-        keyring.set_password(keyring_service_name(), KEYRING_ACCOUNTS_ACCOUNT, payload)
-    except Exception:
-        pass
-
-    cfg = credentials_file_path()
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(payload + "\n", encoding="utf-8")
-    with suppress(OSError):
-        cfg.chmod(0o600)
 
 
 def _parse_accounts_json(value: str) -> StoredFioAccounts:
